@@ -468,3 +468,72 @@ fn nothing_arrives_on_this_route_because_there_is_nobody_to_accept_it_from() {
         Err(Ok(HyperionError::AdapterNotSet))
     );
 }
+
+#[test]
+fn asserted_provider_failure_never_authorizes_retry_or_overwrites_original_source_record() {
+    let w = World::new();
+    let nonce = w.router().bridge_out(&w.user, &w.request(HUNDRED));
+    let before = (
+        w.token().balance(&w.user),
+        w.token().balance(&w.treasury),
+        w.pool().sold(),
+        w.adapter().gas_balance(),
+    );
+    let record = w
+        .adapter()
+        .reconcile_outbound(&nonce, &crate::types::ProviderStatus::Unknown)
+        .record;
+    assert_eq!(record.token, w.token_id);
+    assert_eq!(record.amount, net_of(HUNDRED));
+    assert_eq!(record.destination, w.evm(1));
+    assert_eq!(record.receive_token, w.receive_token());
+    for status in [
+        crate::types::ProviderStatus::Failed,
+        crate::types::ProviderStatus::Unknown,
+        crate::types::ProviderStatus::Submitted,
+        crate::types::ProviderStatus::Unsupported,
+    ] {
+        let evidence = w.adapter().reconcile_outbound(&nonce, &status);
+        assert!(!evidence.retry_allowed);
+        assert!(
+            !evidence.recovery_supported,
+            "caller status cannot enable unsupported recovery"
+        );
+        assert!(
+            !evidence.provider_identity_available,
+            "source amount cannot invent post-pool provider digest"
+        );
+        assert_eq!(evidence.record, record);
+    }
+    assert_eq!(
+        w.adapter().try_dispatch(
+            &w.router_id,
+            &w.token_id,
+            &HUNDRED,
+            &w.ethereum(),
+            &w.evm(2),
+            &nonce
+        ),
+        Err(Ok(HyperionError::ReplayedMessage))
+    );
+    assert_eq!(
+        w.adapter()
+            .try_reconcile_outbound(&99, &crate::types::ProviderStatus::Failed),
+        Err(Ok(HyperionError::UnknownNonce))
+    );
+    assert_eq!(
+        (
+            w.token().balance(&w.user),
+            w.token().balance(&w.treasury),
+            w.pool().sold(),
+            w.adapter().gas_balance()
+        ),
+        before
+    );
+    assert_eq!(
+        w.adapter()
+            .reconcile_outbound(&nonce, &crate::types::ProviderStatus::Failed)
+            .record,
+        record
+    );
+}

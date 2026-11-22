@@ -43,6 +43,7 @@ method set_domain_disabled
 method set_fee_policy
 method set_lane_finality_policy
 method set_peer_messenger
+method set_remote_sender
 method sweep
 method upgrade
 

@@ -5,23 +5,32 @@ import {Ownable} from "openzeppelin/access/Ownable.sol";
 import {Ownable2Step} from "openzeppelin/access/Ownable2Step.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "openzeppelin/utils/ReentrancyGuard.sol";
 
 import {
     AlreadyConfigured,
     DecimalOverflow,
     InvalidAmount,
+    MalformedMessage,
+    NotMintRecipient,
+    NothingMinted,
     RailNotConfigured,
     RefundFailed,
+    ReplayedMessage,
     TimelockDelayOutOfRange,
     TimelockNotQueued,
     TimelockNotReady,
     TokenNotMapped,
     Unauthorized,
+    UnexpectedRailContract,
     UnknownChain,
+    UnsupportedMessageVersion,
+    WrongDomain,
     ZeroAddress
 } from "../HyperionErrors.sol";
-import {AddressKind, Destination, RouteKind} from "../HyperionTypes.sol";
-import {ITokenMessengerV2} from "../interfaces/ICctpV2.sol";
+import {AddressKind, Destination, Origin, RouteKind} from "../HyperionTypes.sol";
+import {IMessageTransmitterV2, ITokenMessengerV2} from "../interfaces/ICctpV2.sol";
+import {IHyperionRouter} from "../interfaces/IHyperionRouter.sol";
 import {IRailAdapter} from "../interfaces/IRailAdapter.sol";
 import {HyperionNotes} from "../libraries/HyperionNotes.sol";
 import {StellarAddress} from "../libraries/StellarAddress.sol";
@@ -33,12 +42,12 @@ import {StellarAddress} from "../libraries/StellarAddress.sol";
 /// wait: Circle's attestation service has to sign the burn before anything can mint, and asking
 /// for finalized rather than fast means waiting for the source chain to finalize too.
 ///
-/// This adapter only sends. That is not a gap, it is the shape of the integration. Going the
-/// other way, Stellar to here, the Soroban side sets CCTP's mint recipient to the user's own EVM
-/// address and attaches no hook at all, so USDC mints straight into their wallet and Hyperion is
-/// not in the path. There is nothing for a contract on this chain to do, so there is no contract.
+/// This adapter supports outbound burns and a separately gated inbound receive boundary. Stellar
+/// to EVM deliveries require explicit local-domain, source-domain, remote-sender, mint-recipient,
+/// burn-token and hook configuration before they can enter the router. No lane configuration alone
+/// activates inbound trust.
 ///
-/// Going this way the mint recipient has to be Hyperion's adapter on Stellar instead, because
+/// Going from EVM the mint recipient has to be Hyperion's adapter on Stellar instead, because
 /// CCTP's recipient field is thirty two flat bytes with nowhere to record whether they name a
 /// classic account or a Soroban contract, and on Stellar those are two completely different kinds
 /// of delivery. So the recipient names Hyperion over there and the real destination travels in
@@ -48,7 +57,7 @@ import {StellarAddress} from "../libraries/StellarAddress.sol";
 /// EVM and other rail development paths remain explicitly gated until independently validated.
 /// Compatibility with provider upgrades requires explicit message-boundary tooling and approval
 /// lifecycle reconciliation.
-contract CctpAdapter is IRailAdapter, Ownable2Step {
+contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice Version for CCTP approval diagnostics.
@@ -86,7 +95,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         bool recoverySupported;
     }
 
-    /// @notice CCTP message transmitter used to attest provider lane readiness.
+    /// @notice Owner-configured Circle transmitter for attestation verification and readiness probes.
     address public messageTransmitter;
 
     /// @notice Expected residual allowance on the token messenger.
@@ -155,6 +164,19 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     }
 
     mapping(string chain => Lane lane) private _lanes;
+
+    /// @notice Independently commissioned inbound identities for a Circle source domain.
+    struct InboundLane {
+        string chain;
+        bytes32 tokenMessenger;
+        bytes32 peer;
+        bytes32 burnToken;
+        bool configured;
+        bool enabled;
+    }
+
+    mapping(uint32 domain => InboundLane lane) private _inboundLanes;
+    mapping(bytes32 replayKey => bool processed) private _processed;
     mapping(string chain => PeerRotation) private _pendingRotations;
     mapping(string chain => HistoricalPeer) private _historicalPeers;
 
@@ -193,6 +215,15 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     /// @notice Emitted when the configured CCTP message transmitter changes.
     event MessageTransmitterSet(address indexed transmitter);
 
+    /// @notice An inbound source domain was commissioned independently of outbound lanes.
+    event InboundLaneConfigured(
+        uint32 indexed domain, string chain, bytes32 tokenMessenger, bytes32 peer, bytes32 burnToken
+    );
+
+    /// @notice An independently commissioned inbound domain was enabled or disabled.
+    event InboundLaneEnabled(uint32 indexed domain, bool enabled);
+
+    /// @notice Preserve the outbound constructor; inbound requires explicit transmitter and lane setup.
     constructor(address router, address tokenMessenger, address usdc, address owner_) Ownable(owner_) {
         if (router == address(0) || tokenMessenger == address(0) || usdc == address(0)) {
             revert ZeroAddress();
@@ -260,6 +291,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         external
         payable
         override
+        nonReentrant
         returns (bytes32)
     {
         if (msg.sender != ROUTER) revert Unauthorized();
@@ -302,6 +334,120 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         return bytes32(0);
     }
 
+    /// @notice Receive an attested CCTP burn and deliver it through the Hyperion router.
+    /// @dev All message-boundary checks happen before minting. Circle owns attestation verification;
+    /// Hyperion owns domain, peer, recipient, token, hook and replay identity checks.
+    function receiveMessage(bytes calldata message, bytes calldata attestation)
+        external
+        nonReentrant
+        returns (uint64 claimId)
+    {
+        (
+            InboundLane memory lane,
+            uint256 amount,
+            address payoutRecipient,
+            uint64 sourceNonce,
+            bytes32 replayId
+        ) = _validateInboundMessage(message);
+        uint32 sourceDomain = _readUint32(message, 4);
+        IMessageTransmitterV2 transmitter = IMessageTransmitterV2(messageTransmitter);
+        bytes32 replayKey = keccak256(abi.encode(sourceDomain, replayId));
+        if (_processed[replayKey]) revert ReplayedMessage();
+        _processed[replayKey] = true;
+        uint256 beforeValue = IERC20(USDC).balanceOf(address(this));
+        // receiveMessage and dispatch share nonReentrant; this baseline deliberately measures
+        // preexisting custody, and the post-call mint must equal the attested amount exactly.
+        // slither-disable-next-line reentrancy-balance
+        if (!transmitter.receiveMessage(message, attestation)) revert MalformedMessage();
+        uint256 afterValue = IERC20(USDC).balanceOf(address(this));
+        if (afterValue <= beforeValue) revert NothingMinted();
+        if (afterValue - beforeValue != amount) revert InvalidAmount();
+        IERC20(USDC).forceApprove(ROUTER, amount);
+        if (IERC20(USDC).allowance(address(this), ROUTER) != amount) revert InvalidAmount();
+        // The immutable router is guarded, receives only this exact allowance, and must leave
+        // preexisting adapter custody unchanged; callback interference fails the checks below.
+        // slither-disable-next-line reentrancy-balance
+        claimId = IHyperionRouter(ROUTER)
+            .bridgeIn(
+                RouteKind.Cctp,
+                USDC,
+                amount,
+                payoutRecipient,
+                Origin({chain: lane.chain, nonce: sourceNonce, messageId: replayId, sender: lane.peer})
+            );
+        IERC20(USDC).forceApprove(ROUTER, 0);
+        if (
+            IERC20(USDC).allowance(address(this), ROUTER) != 0
+                || IERC20(USDC).balanceOf(address(this)) != beforeValue
+        ) revert InvalidAmount();
+    }
+
+    /// @dev Validate the full provider wire and hook before any provider mint call.
+    function _validateInboundMessage(bytes calldata message)
+        private
+        view
+        returns (
+            InboundLane memory lane,
+            uint256 amount,
+            address payoutRecipient,
+            uint64 sourceNonce,
+            bytes32 replayId
+        )
+    {
+        if (message.length < 376) revert MalformedMessage();
+        if (_readUint32(message, 0) != 1 || _readUint32(message, 148) != 1) {
+            revert UnsupportedMessageVersion();
+        }
+        uint32 sourceDomain = _readUint32(message, 4);
+        lane = _inboundLanes[sourceDomain];
+        if (!lane.configured || !lane.enabled || messageTransmitter.code.length == 0) {
+            revert RailNotConfigured();
+        }
+        IMessageTransmitterV2 transmitter = IMessageTransmitterV2(messageTransmitter);
+        if (_readUint32(message, 8) != transmitter.localDomain()) revert WrongDomain();
+        // Header sender is Circle's remote TokenMessenger. The burn sender is Hyperion's peer.
+        if (_readBytes32(message, 44) != lane.tokenMessenger || _readBytes32(message, 248) != lane.peer) {
+            revert UnexpectedRailContract();
+        }
+        if (_readBytes32(message, 76) != bytes32(uint256(uint160(address(TOKEN_MESSENGER))))) {
+            revert UnexpectedRailContract();
+        }
+        bytes32 caller = _readBytes32(message, 108);
+        if (caller != bytes32(0) && caller != bytes32(uint256(uint160(address(this))))) {
+            revert UnexpectedRailContract();
+        }
+        if (
+            _readUint32(message, 140) != FINALITY_THRESHOLD_FINALIZED
+                || _readUint32(message, 144) < FINALITY_THRESHOLD_FINALIZED
+        ) revert MalformedMessage();
+        if (_readBytes32(message, 152) != lane.burnToken) revert TokenNotMapped();
+        if (_readBytes32(message, 184) != bytes32(uint256(uint160(address(this))))) {
+            revert NotMintRecipient();
+        }
+        amount = _readUint256(message, 216);
+        if (amount == 0 || amount > type(uint128).max) revert InvalidAmount();
+        // Finalized-only forwarding has no provider fee; expiration remains an upstream boundary.
+        if (_readUint256(message, 280) != 0 || _readUint256(message, 312) != 0) revert InvalidAmount();
+        uint256 expiration = _readUint256(message, 344);
+        if (expiration != 0 && block.number >= expiration) revert MalformedMessage();
+        (payoutRecipient, sourceNonce) = HyperionNotes.decodeOutboundNote(message[376:]);
+        replayId = _readBytes32(message, 12);
+    }
+
+    function _readUint32(bytes calldata raw, uint256 offset) private pure returns (uint32 value) {
+        if (raw.length < offset + 4) revert MalformedMessage();
+        value = uint32(bytes4(raw[offset:offset + 4]));
+    }
+
+    function _readBytes32(bytes calldata raw, uint256 offset) private pure returns (bytes32 value) {
+        if (raw.length < offset + 32) revert MalformedMessage();
+        value = bytes32(raw[offset:offset + 32]);
+    }
+
+    function _readUint256(bytes calldata raw, uint256 offset) private pure returns (uint256 value) {
+        return uint256(_readBytes32(raw, offset));
+    }
+
     /// @notice Make a destination reachable.
     /// @dev A lane can be configured once and after that only switched off. Repointing a live
     /// lane's mint recipient would move every future burn on it to a different contract, which is
@@ -318,6 +464,44 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         lane.enabled = true;
         emit LaneConfigured(chain, domain, mintRecipient);
         emit LaneEnabled(chain, true);
+    }
+
+    /// @notice Commission inbound identities without granting any trust from an outbound lane.
+    /// @dev Immutable per source domain; replacing a peer requires a separately reviewed deployment.
+    function setInboundLane(
+        uint32 domain,
+        string calldata chain,
+        bytes32 tokenMessenger,
+        bytes32 peer,
+        bytes32 burnToken
+    ) external onlyOwner {
+        if (bytes(chain).length == 0) revert UnknownChain();
+        if (tokenMessenger == bytes32(0) || peer == bytes32(0) || burnToken == bytes32(0)) {
+            revert ZeroAddress();
+        }
+        if (_inboundLanes[domain].configured) revert AlreadyConfigured();
+        _inboundLanes[domain] = InboundLane({
+            chain: chain,
+            tokenMessenger: tokenMessenger,
+            peer: peer,
+            burnToken: burnToken,
+            configured: true,
+            enabled: true
+        });
+        emit InboundLaneConfigured(domain, chain, tokenMessenger, peer, burnToken);
+        emit InboundLaneEnabled(domain, true);
+    }
+
+    /// @notice Disable or re-enable an already commissioned inbound domain, preserving accepted claims.
+    function setInboundLaneEnabled(uint32 domain, bool enabled) external onlyOwner {
+        if (!_inboundLanes[domain].configured) revert RailNotConfigured();
+        _inboundLanes[domain].enabled = enabled;
+        emit InboundLaneEnabled(domain, enabled);
+    }
+
+    /// @notice Read the independent source-domain identities.
+    function inboundLaneOf(uint32 domain) external view returns (InboundLane memory) {
+        return _inboundLanes[domain];
     }
 
     /// @notice Turn a configured destination on or off.

@@ -209,6 +209,14 @@ impl World {
             &ETHEREUM_DOMAIN,
             &BytesN::from_array(&self.env, &[0u8; 32]),
         );
+        self.adapter().set_remote_sender(
+            &ETHEREUM_DOMAIN,
+            &BytesN::from_array(&self.env, &[0x5Eu8; 32]),
+        );
+        self.adapter().set_peer_messenger(
+            &ETHEREUM_DOMAIN,
+            &BytesN::from_array(&self.env, &[0xE1u8; 32]),
+        );
     }
 
     pub fn fund_user(&self, amount: i128) {
@@ -343,6 +351,9 @@ impl World {
             mint_recipient: self.adapter_key(),
             amount,
             message_sender: [0x5Eu8; 32],
+            max_fee: 0,
+            fee_executed: 0,
+            expiration_block: 0,
             hook,
         }
     }
@@ -359,6 +370,7 @@ impl World {
 /// Every inbound test starts from a valid one of these and breaks exactly one field, which is the
 /// only way to be sure a refusal came from the reason the test claims and not from three other
 /// things being wrong at once.
+#[derive(Clone)]
 pub struct MessageSpec {
     pub version: u32,
     pub source_domain: u32,
@@ -373,6 +385,9 @@ pub struct MessageSpec {
     pub mint_recipient: [u8; 32],
     pub amount: i128,
     pub message_sender: [u8; 32],
+    pub max_fee: i128,
+    pub fee_executed: i128,
+    pub expiration_block: i128,
     pub hook: Bytes,
 }
 
@@ -398,6 +413,9 @@ impl MessageSpec {
         // A uint256 holding a number that fits in sixteen bytes, so the low half is where it goes.
         body[84..100].copy_from_slice(&(self.amount as u128).to_be_bytes());
         body[100..132].copy_from_slice(&self.message_sender);
+        body[148..164].copy_from_slice(&self.max_fee.to_be_bytes());
+        body[180..196].copy_from_slice(&self.fee_executed.to_be_bytes());
+        body[212..228].copy_from_slice(&self.expiration_block.to_be_bytes());
         // 132..228 is max fee, fee executed and expiration block. Zero means Circle charged
         // nothing, which is what a finalized transfer costs.
 

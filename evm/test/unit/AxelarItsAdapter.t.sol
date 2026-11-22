@@ -30,6 +30,8 @@ import {
 import {
     AddressKind,
     Destination,
+    OutboundRequest,
+    PendingClaim,
     RouteKind,
     TokenMappingConflict,
     TokenMappingReport
@@ -1096,6 +1098,147 @@ contract AxelarItsAdapterTest is Fixture {
         assertEq(usdc.allowance(address(adapter), address(router)), 0);
     }
 
+    /// @dev This is the local GMP rehearsal: a router-funded dispatch crosses the real adapter
+    /// boundary, a forged source peer is rejected by ITS delivery, and an authenticated callback
+    /// still succeeds when the recipient is temporarily unable to receive the token. The router
+    /// parks that delivery as a recipient-bound claim, which can be settled after the recipient
+    /// becomes available. Keeping all three stages in one fixture prevents a mock callback from
+    /// accidentally proving only the adapter in isolation.
+    function test_authenticated_gmp_rehearsal_preserves_custody_and_parks_a_claim() public {
+        _setAdapter(RouteKind.AxelarIts, address(adapter));
+        _setRailReceiver(RouteKind.AxelarIts, address(adapter));
+        _assertForgedGatewayCannotDeliver();
+
+        OutboundRequest memory request = _request(AMOUNT, RouteKind.AxelarIts);
+        request.token = address(usdc);
+        request.destinationDecimals = USDC_DECIMALS;
+
+        uint256 itsBefore = usdc.balanceOf(address(its));
+        vm.prank(alice);
+        router.bridgeOut(request);
+
+        assertEq(its.sentCount(), 1, "the authenticated adapter handed custody to ITS");
+        assertGt(usdc.balanceOf(address(its)), itsBefore);
+
+        uint256 custodyBefore = usdc.balanceOf(address(its));
+        bytes memory forgedPeer = bytes(G_ADDR);
+        vm.expectRevert(UnexpectedRailContract.selector);
+        its.deliver(
+            address(adapter),
+            COMMAND_ID,
+            AXELAR_STELLAR,
+            forgedPeer,
+            _outboundNote(bob, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+
+        assertEq(usdc.balanceOf(address(its)), custodyBefore, "forged delivery preserves ITS custody");
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+        assertEq(router.claimCount(), 0);
+        usdc.setBlocked(bob, true);
+        _deliver(COMMAND_ID, bob, DELIVERY);
+
+        assertEq(router.claimCount(), 1);
+        PendingClaim memory claim = router.pendingClaim(1);
+        assertEq(claim.recipient, bob);
+        assertEq(claim.amount, DELIVERY);
+        assertEq(uint8(claim.route), uint8(RouteKind.AxelarIts));
+        assertEq(claim.sourceChain, STELLAR);
+        assertEq(claim.sourceNonce, SOURCE_NONCE);
+        assertFalse(claim.settled);
+
+        usdc.setBlocked(bob, false);
+        router.settleClaim(1);
+
+        assertTrue(router.pendingClaim(1).settled);
+        assertEq(usdc.balanceOf(bob), DELIVERY);
+
+        vm.expectRevert(ReplayedMessage.selector);
+        _deliver(COMMAND_ID, bob, DELIVERY);
+    }
+
+    function _assertForgedGatewayCannotDeliver() private {
+        uint256 custody = usdc.balanceOf(address(its));
+        vm.prank(stranger);
+        vm.expectRevert(Unauthorized.selector);
+        adapter.executeWithInterchainToken(
+            COMMAND_ID,
+            AXELAR_STELLAR,
+            peerAddress,
+            _outboundNote(bob, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(usdc.balanceOf(address(its)), custody);
+        assertEq(router.claimCount(), 0);
+    }
+
+    function test_refund_delta_with_paid_real_router_keeps_unattributed_balance() public {
+        _setAdapter(RouteKind.AxelarIts, address(adapter));
+        vm.deal(address(adapter), 0.05 ether);
+        vm.deal(alice, 2 ether);
+        its.setRefundBps(5000);
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+        OutboundRequest memory request = _request(AMOUNT, RouteKind.AxelarIts);
+        request.token = address(usdc);
+        request.destinationDecimals = USDC_DECIMALS;
+        vm.prank(alice);
+        router.bridgeOut{value: 0.5 ether}(request);
+        assertEq(alice.balance, 1.75 ether);
+        assertEq(address(adapter).balance, 0.05 ether);
+        assertEq(address(router).balance, 0);
+        assertEq(its.lastSent().value, 0.5 ether);
+        assertEq(usdc.balanceOf(treasury) - treasuryBefore, (AMOUNT * FEE_BPS) / 10_000);
+    }
+
+    function test_paid_real_router_retains_provider_refund_above_current_payment() public {
+        _setAdapter(RouteKind.AxelarIts, address(adapter));
+        vm.deal(address(adapter), 0.05 ether);
+        vm.deal(address(its), 0.25 ether);
+        vm.deal(alice, 2 ether);
+        its.setRefundBps(15_000);
+        OutboundRequest memory request = _request(AMOUNT, RouteKind.AxelarIts);
+        request.token = address(usdc);
+        request.destinationDecimals = USDC_DECIMALS;
+        vm.prank(alice);
+        router.bridgeOut{value: 0.5 ether}(request);
+        assertEq(alice.balance, 2 ether, "refund cannot exceed the sender's gas payment");
+        assertEq(address(adapter).balance, 0.3 ether, "late custody and excess stay unassigned");
+        assertEq(address(router).balance, 0);
+        assertEq(its.lastSent().value, 0.5 ether);
+        assertEq(address(its).balance, 0);
+        assertEq(router.refundCredits(alice), 0);
+    }
+
+    function test_provider_failure_rolls_back_paid_dispatch_fee_and_metadata() public {
+        _setAdapter(RouteKind.AxelarIts, address(adapter));
+        vm.deal(address(adapter), 0.05 ether);
+        vm.deal(alice, 2 ether);
+        its.setDispatchReverts(true);
+        uint256 senderBefore = usdc.balanceOf(alice);
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+        OutboundRequest memory request = _request(AMOUNT, RouteKind.AxelarIts);
+        request.token = address(usdc);
+        request.destinationDecimals = USDC_DECIMALS;
+        vm.prank(alice);
+        vm.expectRevert("ITS failed after transfer");
+        router.bridgeOut{value: 0.5 ether}(request);
+        assertEq(alice.balance, 2 ether);
+        assertEq(usdc.balanceOf(alice), senderBefore);
+        assertEq(usdc.balanceOf(treasury), treasuryBefore);
+        assertEq(address(adapter).balance, 0.05 ether);
+        assertEq(router.outboundNonce(), 0);
+        assertEq(router.outboundRecord(1).nonce, 0);
+        assertEq(its.sentCount(), 0);
+        its.setDispatchReverts(false);
+        vm.prank(alice);
+        router.bridgeOut{value: 0.5 ether}(request);
+        assertEq(router.outboundNonce(), 1);
+    }
+
     /// @dev Axelar's command id is unique per delivery and is what its own replay protection is
     /// keyed on, so the router keys its guard on the same value rather than on a nonce the far
     /// side chose for itself.
@@ -1164,6 +1307,79 @@ contract AxelarItsAdapterTest is Fixture {
         assertEq(intent.sender, alice);
         assertEq(intent.destinationBinding, destinationBinding);
         assertEq(intent.nativeSpent, 0.25 ether);
+    }
+
+    function test_gas_service_failure_restores_first_binding_and_reverse_map() public {
+        (bytes32 intentId, bytes32 binding) = _dispatchIntent();
+        bytes32 failedTx = keccak256("failed first gas receipt");
+        AxelarItsAdapter.TopUpMetadata memory metadata =
+            _topUpMetadata(intentId, binding, failedTx, 3, alice, 0.5 ether);
+        vm.deal(alice, 2 ether);
+        vm.deal(address(adapter), 0.05 ether);
+        gasService.setRevertsAfterReceipt(true);
+        vm.prank(alice);
+        vm.expectRevert("gas service failed after receipt");
+        adapter.topUpGas{value: 0.2 ether}(metadata);
+        AxelarItsAdapter.TransferIntent memory failed = adapter.topUpIntent(intentId);
+        assertFalse(failed.messageBound);
+        assertEq(failed.messageTxHash, bytes32(0));
+        assertEq(failed.messageLogIndex, 0);
+        assertEq(failed.refundAddress, address(0));
+        assertEq(failed.maxNativeSpend, 0);
+        assertEq(failed.nativeSpent, 0);
+        assertEq(alice.balance, 2 ether);
+        assertEq(address(adapter).balance, 0.05 ether);
+        assertEq(address(gasService).balance, 0);
+        assertEq(gasService.topUpCount(), 0);
+        assertEq(gasService.lastTopUp().txHash, bytes32(0));
+        gasService.setRevertsAfterReceipt(false);
+        // A different intent can bind the failed tx/log: the reverse map also rolled back.
+        (bytes32 otherIntent, bytes32 otherBinding) = _dispatchIntentAt(NONCE + 1);
+        AxelarItsAdapter.TopUpMetadata memory other =
+            _topUpMetadata(otherIntent, otherBinding, failedTx, 3, alice, 0.5 ether);
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.1 ether}(other);
+        metadata.txHash = keccak256("fresh retry gas receipt");
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.2 ether}(metadata);
+        assertTrue(adapter.topUpIntent(intentId).messageBound);
+        assertEq(adapter.topUpIntent(intentId).messageTxHash, metadata.txHash);
+        assertEq(adapter.topUpIntent(intentId).nativeSpent, 0.2 ether);
+        assertEq(gasService.topUpCount(), 2);
+        assertEq(address(gasService).balance, 0.3 ether);
+        assertEq(address(adapter).balance, 0.05 ether);
+        assertEq(alice.balance, 1.7 ether);
+    }
+
+    function test_gas_service_failure_preserves_existing_binding_and_spend_cap() public {
+        (bytes32 intentId, bytes32 binding) = _dispatchIntent();
+        AxelarItsAdapter.TopUpMetadata memory metadata =
+            _topUpMetadata(intentId, binding, keccak256("bound gas receipt"), 4, alice, 0.5 ether);
+        vm.deal(alice, 2 ether);
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.1 ether}(metadata);
+        gasService.setRevertsAfterReceipt(true);
+        vm.prank(alice);
+        vm.expectRevert("gas service failed after receipt");
+        adapter.topUpGas{value: 0.2 ether}(metadata);
+        AxelarItsAdapter.TransferIntent memory failed = adapter.topUpIntent(intentId);
+        assertTrue(failed.messageBound);
+        assertEq(failed.messageTxHash, metadata.txHash);
+        assertEq(failed.messageLogIndex, metadata.logIndex);
+        assertEq(failed.refundAddress, alice);
+        assertEq(failed.maxNativeSpend, 0.5 ether);
+        assertEq(failed.nativeSpent, 0.1 ether);
+        assertEq(alice.balance, 1.9 ether);
+        assertEq(address(gasService).balance, 0.1 ether);
+        assertEq(gasService.topUpCount(), 1);
+        assertEq(gasService.lastTopUp().value, 0.1 ether);
+        gasService.setRevertsAfterReceipt(false);
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.2 ether}(metadata);
+        assertEq(adapter.topUpIntent(intentId).nativeSpent, 0.3 ether);
+        assertEq(alice.balance, 1.7 ether);
+        assertEq(address(gasService).balance, 0.3 ether);
+        assertEq(gasService.topUpCount(), 2);
     }
 
     function test_top_ups_may_repeat_only_with_the_same_message_and_refund_binding() public {
@@ -1275,10 +1491,9 @@ contract AxelarItsAdapterTest is Fixture {
         assertEq(address(adapter).balance, 0.05 ether);
     }
 
-    /// @dev And then it leaves. The next transfer sweeps it to the router, which pays it out as
-    /// change. Not to the person who overpaid, which is the honest cost of a rail that does not
-    /// say which transfer a refund belongs to.
-    function test_a_late_gas_refund_leaves_on_the_next_transfer() public {
+    /// @dev A late refund has no transfer binding. The next dispatch must not sweep it to an
+    /// unrelated sender as change.
+    function test_a_late_gas_refund_is_not_redirected_to_the_next_sender() public {
         vm.deal(address(adapter), 0.05 ether);
         _fund(AMOUNT);
         uint256 before = address(router).balance;
@@ -1286,8 +1501,8 @@ contract AxelarItsAdapterTest is Fixture {
         vm.prank(address(router));
         adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
 
-        assertEq(address(adapter).balance, 0);
-        assertEq(address(router).balance, before + 0.05 ether);
+        assertEq(address(adapter).balance, 0.05 ether);
+        assertEq(address(router).balance, before);
     }
 
     function test_a_top_up_of_nothing_is_refused() public {

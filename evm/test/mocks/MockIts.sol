@@ -32,6 +32,7 @@ contract MockIts is IInterchainTokenService {
     /// @dev Some of the value is handed back, the way a real destination gas market refunds what
     /// it did not spend. Set to zero for the case where the rail keeps all of it.
     uint256 public refundBps;
+    bool public dispatchReverts;
 
     function setRegistered(bytes32 tokenId, address token) external {
         _registered[tokenId] = token;
@@ -46,6 +47,10 @@ contract MockIts is IInterchainTokenService {
     /// answered politely would let it get away with not handling one.
     function setTokenManager(bytes32 tokenId, address manager) external {
         _managers[tokenId] = manager;
+    }
+
+    function setDispatchReverts(bool value) external {
+        dispatchReverts = value;
     }
 
     function setRefundBps(uint256 bps) external {
@@ -90,6 +95,7 @@ contract MockIts is IInterchainTokenService {
             value: msg.value
         });
         ++sentCount;
+        if (dispatchReverts) revert("ITS failed after transfer");
 
         if (refundBps != 0 && msg.value != 0) {
             (bool sent,) = payable(msg.sender).call{value: (msg.value * refundBps) / 10_000}("");

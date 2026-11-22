@@ -61,6 +61,9 @@ for them. Existing request and quote schemas remain compatible. The active deplo
 Stellar Testnet outbound ITS/CCTP; new entrypoints require reviewed router/adapter upgrades,
 and these source changes do not activate additional deployments.
 
+The EVM governance and parked-claim gas budgets, including their Foundry reproduction command
+and compiler profile, are documented in [EVM gas budgets](docs/EVM_GAS_BUDGETS.md).
+
 ## Organization overview
 
 The StellarHyperion organization divides cross-chain routing across three dedicated repositories:
@@ -95,6 +98,23 @@ script/               deployment drivers for both halves
 deployments/          deployment records, written by the scripts and validated on write
 docs/                 the architecture document this was built from
 ```
+
+## CCTP message compatibility inspection
+
+Before a provider message is considered for execution, inspect its raw bytes without signing or
+broadcasting anything:
+
+```bash
+node script/stellar/inspect-cctp-message.mjs --message 0x...
+```
+
+The JSON report preserves the full 32-byte message nonce and complete hook bytes. It reports the
+message, burn, and Hyperion hook versions, domains, burn fields, destination kind, finality
+requirements, and byte offsets for truncated, oversized, or shape-incompatible fields. Unknown
+versions retain their raw bytes, with decoded fields labeled as observations of the known layout.
+`structurallyCompatible` describes supported shape only; `executable` is always `false`. Execution
+requires separate attestation, domain, token, finality, expiry, authorization, and replay checks.
+Hex input is bounded to 64 KiB of decoded bytes (256 KiB of text).
 
 ## The test suites
 

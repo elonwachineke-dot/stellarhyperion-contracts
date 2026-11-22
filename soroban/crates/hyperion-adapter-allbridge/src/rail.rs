@@ -277,3 +277,23 @@ pub fn hash_message(
     out[1] = destination_chain_id as u8;
     BytesN::from_array(env, &out)
 }
+
+/// Bind signed epochs to the network, adapter, epoch, key and canonical provider message.
+/// Epoch zero is reserved for upgraded legacy Validator-only storage.
+pub fn validator_attestation_digest(
+    env: &Env,
+    adapter: &Address,
+    epoch: &crate::types::ValidatorEpoch,
+    message_id: &BytesN<32>,
+) -> Result<BytesN<32>, HyperionError> {
+    if epoch.epoch == 0 {
+        return Ok(message_id.clone());
+    }
+    let mut bytes = soroban_sdk::Bytes::from_slice(env, b"HYPERION_ALLBRIDGE_VALIDATOR_V1");
+    bytes.append(&env.ledger().network_id().into());
+    bytes.extend_from_array(&codec::contract_key(env, adapter)?);
+    bytes.extend_from_slice(&epoch.epoch.to_be_bytes());
+    bytes.extend_from_array(&epoch.validator.to_array());
+    bytes.extend_from_array(&message_id.to_array());
+    Ok(env.crypto().sha256(&bytes).into())
+}

@@ -1,11 +1,12 @@
 # Hyperion
+
 ### Stellar ⇄ EVM Cross-Chain Bridge — Architecture Plan
 
-| | |
-|---|---|
-| **Version** | 0.1 — pre-implementation draft |
-| **Date** | September 26, 2026 |
-| **Status** | For review before Phase 0 kickoff |
+|             |                                   |
+| ----------- | --------------------------------- |
+| **Version** | 0.1 — pre-implementation draft    |
+| **Date**    | September 26, 2026                |
+| **Status**  | For review before Phase 0 kickoff |
 
 ---
 
@@ -25,12 +26,14 @@ The current Stellar Testnet deployment has outbound Axelar ITS and Circle CCTP r
 ## 3. Scope — v1
 
 **In scope**
+
 - **Assets:** USDC first (deepest liquidity, has an official audited rail — CCTP — on day one), then XLM and a short list of additional stablecoins.
 - **Chains:** Ethereum mainnet (reach and liquidity), one low-fee L2 (Base or Arbitrum), and Circle's Arc — which launched mainnet on September 16, 2026 with USDC as native gas and is already CCTP/Gateway-connected. Since USDC is Hyperion's first asset, Arc is a low-effort, high-relevance third target; treat it as fresh (10 days old at time of writing) and re-verify tooling maturity before committing infrastructure to it.
 - **Directions:** Stellar → EVM and EVM → Stellar, symmetric.
 - **One "smart" path:** bridge-then-swap in a single user action via the destination rail's hooks, once the base routes are stable.
 
 **Out of scope for v1**
+
 - NFTs or other non-fungible transfers.
 - A Hyperion-operated validator set, light client, or attestation service of any kind — this is the whole point of Section 2.
 - Non-EVM destinations beyond Stellar and EVM chains, even though some underlying rails could reach further (Solana, Cosmos).
@@ -95,13 +98,13 @@ The Route Planner is the only place that "knows" about all four rails. Everythin
 
 ## 5. Routing Decision Table
 
-| Situation | Rail | Why |
-|---|---|---|
-| Native USDC, Stellar ⇄ any CCTP-connected chain | **Circle CCTP V2** (Stellar = domain 27) | Official Circle rail, zero-slippage burn-and-mint, no wrapped asset |
-| XLM or another Stellar-native asset needs a canonical EVM representation | **Axelar Interchain Token Service** | Canonical registration, decentralized validator security, built-in flow limits |
-| Arbitrary cross-chain instruction (e.g. "bridge and stake in one step") | **Axelar GMP** or **LayerZero OApp** | General message passing; pick per desired trust model — Axelar's PoS/amplifier validators vs. LayerZero's configurable DVN set |
+| Situation                                                                                  | Rail                                         | Why                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Native USDC, Stellar ⇄ any CCTP-connected chain                                            | **Circle CCTP V2** (Stellar = domain 27)     | Official Circle rail, zero-slippage burn-and-mint, no wrapped asset                                                                                    |
+| XLM or another Stellar-native asset needs a canonical EVM representation                   | **Axelar Interchain Token Service**          | Canonical registration, decentralized validator security, built-in flow limits                                                                         |
+| Arbitrary cross-chain instruction (e.g. "bridge and stake in one step")                    | **Axelar GMP** or **LayerZero OApp**         | General message passing; pick per desired trust model — Axelar's PoS/amplifier validators vs. LayerZero's configurable DVN set                         |
 | Non-USDC stablecoin, or any asset where waiting on attestation is worse than pool slippage | **Allbridge Core (development only; gated)** | Not eligible for activation until its configured-validator trust, pool liquidity, authorization and accounting assumptions are independently validated |
-| "I hold asset A anywhere, I want asset B on Stellar" | **NEAR Intents** | Solver network quotes/executes the swap directly into XLM or Stellar USDC |
+| "I hold asset A anywhere, I want asset B on Stellar"                                       | **NEAR Intents**                             | Solver network quotes/executes the swap directly into XLM or Stellar USDC                                                                              |
 
 ### Allbridge activation evidence gate
 
@@ -244,26 +247,26 @@ Both sketches are interface-level on purpose — clean enough to hand to a codeg
 
 **Cross-chain rails**
 
-| Rail | Purpose | Key artifacts |
-|---|---|---|
-| Circle CCTP V2 | Native USDC burn-and-mint; Stellar is domain 27 | `circlefin/stellar-cctp` (Soroban), Circle's EVM TokenMessenger/MessageTransmitter, Bridge Kit SDK, Iris attestation API |
-| Axelar GMP + ITS | General message passing + canonical token bridging | `axelar-amplifier-stellar` (Soroban Gateway + Gas Service), `@axelar-network/axelarjs-sdk` |
-| LayerZero V2 | Configurable-security (DVN) messaging + omnichain tokens | Stellar/Soroban OApp & OFT endpoint (Code4rena-audited, April 2026), LayerZero EVM SDK |
-| Allbridge Core | Pooled-liquidity native stablecoin swaps | Soroban `allbridge-core-soroban-contracts` (Quarkslab-audited), Allbridge Core JS/TS SDK & REST API |
-| NEAR Intents | Solver-quoted swaps into XLM/Stellar USDC | 1Click API |
+| Rail             | Purpose                                                  | Key artifacts                                                                                                            |
+| ---------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Circle CCTP V2   | Native USDC burn-and-mint; Stellar is domain 27          | `circlefin/stellar-cctp` (Soroban), Circle's EVM TokenMessenger/MessageTransmitter, Bridge Kit SDK, Iris attestation API |
+| Axelar GMP + ITS | General message passing + canonical token bridging       | `axelar-amplifier-stellar` (Soroban Gateway + Gas Service), `@axelar-network/axelarjs-sdk`                               |
+| LayerZero V2     | Configurable-security (DVN) messaging + omnichain tokens | Stellar/Soroban OApp & OFT endpoint (Code4rena-audited, April 2026), LayerZero EVM SDK                                   |
+| Allbridge Core   | Pooled-liquidity native stablecoin swaps                 | Soroban `allbridge-core-soroban-contracts` (Quarkslab-audited), Allbridge Core JS/TS SDK & REST API                      |
+| NEAR Intents     | Solver-quoted swaps into XLM/Stellar USDC                | 1Click API                                                                                                               |
 
 **Stellar & EVM tooling**
 
-| Purpose | Library / tool |
-|---|---|
-| Stellar client, tx build/sign/submit | `@stellar/stellar-sdk` (Horizon + Soroban RPC) |
-| Writing Soroban contracts | `soroban-sdk` (Rust) + `stellar` CLI |
-| Stellar wallet connect | `@creit.tech/stellar-wallets-kit`, `@stellar/freighter-api` |
-| EVM contracts & tests | Foundry, OpenZeppelin Contracts |
-| EVM client & wallet connect | `viem`/`wagmi`, WalletConnect |
-| Price data | Reflector (SEP-40, native Soroban oracle), DIA (cross-chain, also on Soroban) |
-| Off-chain API & jobs | Fastify + TypeScript, Postgres, Redis/BullMQ |
-| AI-assisted dev accuracy | `stellar/stellar-dev-skill` skill set + Stellar's MCP server |
+| Purpose                              | Library / tool                                                                |
+| ------------------------------------ | ----------------------------------------------------------------------------- |
+| Stellar client, tx build/sign/submit | `@stellar/stellar-sdk` (Horizon + Soroban RPC)                                |
+| Writing Soroban contracts            | `soroban-sdk` (Rust) + `stellar` CLI                                          |
+| Stellar wallet connect               | `@creit.tech/stellar-wallets-kit`, `@stellar/freighter-api`                   |
+| EVM contracts & tests                | Foundry, OpenZeppelin Contracts                                               |
+| EVM client & wallet connect          | `viem`/`wagmi`, WalletConnect                                                 |
+| Price data                           | Reflector (SEP-40, native Soroban oracle), DIA (cross-chain, also on Soroban) |
+| Off-chain API & jobs                 | Fastify + TypeScript, Postgres, Redis/BullMQ                                  |
+| AI-assisted dev accuracy             | `stellar/stellar-dev-skill` skill set + Stellar's MCP server                  |
 
 ## 9. Stellar ⇄ EVM Impedance Mismatches
 
@@ -290,7 +293,7 @@ This is the section to make everyone on the team read before writing a line of c
 
 ## 11. Off-Chain Services
 
-Two pieces, both optional to *security* — nothing off-chain is trusted to authorize a transfer — but necessary to *UX*:
+Two pieces, both optional to _security_ — nothing off-chain is trusted to authorize a transfer — but necessary to _UX_:
 
 - **Status indexer/API** — watches Horizon + Soroban RPC events on the Stellar side and EVM logs on the other, and exposes a single "where is my transfer" endpoint so the SDK isn't polling Circle's Iris, Axelar's explorer, an EVM RPC, and Horizon separately from the browser.
 - **Keeper** — a scheduled job that extends Soroban storage TTLs before they archive (Section 9, point 6), and, for routes needing a permissionless "second step" (calling a rail's own relay/claim function once an attestation is ready), triggers that step so users don't have to come back and sign again. It should be writable so anyone could run it — no special privilege, just calling already-public functions — so it never becomes a centralization point.
@@ -334,13 +337,13 @@ Both programs route contributors to repos that already do something real — nei
 
 ## 15. Roadmap
 
-| Phase | Goal | Key deliverables |
-|---|---|---|
-| 0 — Spec freeze (1–2 wks) | Lock this architecture, pick the Phase-1 rail and chain pair | Finalized interfaces (Sections 6–7), repo scaffolded, CI green on empty contracts |
-| 1 — Testnet MVP (4–8 wks) | USDC, Stellar Testnet ⇄ an EVM testnet, via CCTP, both directions | Router contracts, SDK v0, minimal web app, indexer, full test suite incl. failure paths |
-| 2 — Multi-route (parallel) | Add Axelar GMP/ITS + Allbridge as alternate routes; router picks the best one | Route-planner logic, second asset (XLM or a second stablecoin), issue backlog opened |
-| 3 — Mainnet v1 | USDC only, conservative flow limits, independent review of router code | Mainnet deploy, monitoring/alerting live, Wave + GrantFox applications submitted |
-| 4 — Scale | Add Arc / a second EVM chain, the NEAR Intents swap path, raise limits with real volume | Ongoing Wave issue cycles, protocol fee funding maintenance |
+| Phase                      | Goal                                                                                    | Key deliverables                                                                        |
+| -------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 0 — Spec freeze (1–2 wks)  | Lock this architecture, pick the Phase-1 rail and chain pair                            | Finalized interfaces (Sections 6–7), repo scaffolded, CI green on empty contracts       |
+| 1 — Testnet MVP (4–8 wks)  | USDC, Stellar Testnet ⇄ an EVM testnet, via CCTP, both directions                       | Router contracts, SDK v0, minimal web app, indexer, full test suite incl. failure paths |
+| 2 — Multi-route (parallel) | Add Axelar GMP/ITS + Allbridge as alternate routes; router picks the best one           | Route-planner logic, second asset (XLM or a second stablecoin), issue backlog opened    |
+| 3 — Mainnet v1             | USDC only, conservative flow limits, independent review of router code                  | Mainnet deploy, monitoring/alerting live, Wave + GrantFox applications submitted        |
+| 4 — Scale                  | Add Arc / a second EVM chain, the NEAR Intents swap path, raise limits with real volume | Ongoing Wave issue cycles, protocol fee funding maintenance                             |
 
 ## 16. Risks & Open Questions
 
@@ -352,18 +355,18 @@ Both programs route contributors to repos that already do something real — nei
 
 ## Appendix A: Glossary for EVM-Native Contributors
 
-| Term | Meaning |
-|---|---|
-| SCP | Stellar Consensus Protocol — Stellar's federated Byzantine agreement mechanism |
-| Ledger | Stellar's equivalent of a block; closes roughly every 5 seconds |
-| Horizon | Stellar's REST API for classic (non-Soroban) network data |
-| Soroban | Stellar's Rust/WASM smart contract platform, live on mainnet since February 2024 |
-| Trustline | An explicit opt-in an account makes before it can hold a given non-native asset |
-| Anchor | A regulated fiat on/off-ramp entity (SEP-24/SEP-31) — distinct from a crypto-to-crypto bridge like Hyperion |
-| SEP | Stellar Ecosystem Proposal — Stellar's standards track, analogous to an EIP |
-| Muxed account | An `M...` address representing one of many virtual sub-accounts sharing a single `G...` account (SEP-23) |
-| Stroop | The smallest unit of XLM, 10⁻⁷ XLM |
-| Path payment | Stellar's native operation for sending one asset while the recipient receives another, routed through the built-in DEX |
+| Term          | Meaning                                                                                                                |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| SCP           | Stellar Consensus Protocol — Stellar's federated Byzantine agreement mechanism                                         |
+| Ledger        | Stellar's equivalent of a block; closes roughly every 5 seconds                                                        |
+| Horizon       | Stellar's REST API for classic (non-Soroban) network data                                                              |
+| Soroban       | Stellar's Rust/WASM smart contract platform, live on mainnet since February 2024                                       |
+| Trustline     | An explicit opt-in an account makes before it can hold a given non-native asset                                        |
+| Anchor        | A regulated fiat on/off-ramp entity (SEP-24/SEP-31) — distinct from a crypto-to-crypto bridge like Hyperion            |
+| SEP           | Stellar Ecosystem Proposal — Stellar's standards track, analogous to an EIP                                            |
+| Muxed account | An `M...` address representing one of many virtual sub-accounts sharing a single `G...` account (SEP-23)               |
+| Stroop        | The smallest unit of XLM, 10⁻⁷ XLM                                                                                     |
+| Path payment  | Stellar's native operation for sending one asset while the recipient receives another, routed through the built-in DEX |
 
 ## Appendix B: Reference Reading
 
@@ -432,4 +435,40 @@ A disagreement is refused with an existing `HyperionError`; no new error numbers
 
 ---
 
-*This is a v0.1 planning document, not a security review. Treat every contract address, chain ID, and audit status above as something to re-verify against the linked sources at implementation time — this is a fast-moving part of the ecosystem, and Arc in particular is days old as of this writing.*
+_This is a v0.1 planning document, not a security review. Treat every contract address, chain ID, and audit status above as something to re-verify against the linked sources at implementation time — this is a fast-moving part of the ecosystem, and Arc in particular is days old as of this writing._
+
+### Allbridge validator epochs and recovery
+
+Allbridge remains a development adapter and is not activated on Stellar Testnet. Fresh validator
+configuration starts at epoch one. Its Ed25519 signature covers SHA-256 of the literal ASCII
+`HYPERION_ALLBRIDGE_VALIDATOR_V1`, the 32-byte ledger network ID, the 32-byte adapter contract key,
+the big-endian u32 epoch, the 32-byte validator public key, and the existing 32-byte Allbridge
+message digest, concatenated in that order. The provider digest remains the replay identity across
+all epochs. Changing the key, epoch, network or adapter invalidates the signature.
+
+An upgraded deployment with only the existing `Validator` key retains epoch zero and its legacy
+provider-digest signatures. Calling `set_validator` with that same key records this compatibility
+state; it cannot replace an active key. A replacement key is queued for 3,600 seconds and activated
+separately. Epoch-zero migration activates signed epoch one. Fresh epoch-one deployments require
+the domain-bound signatures immediately. Coordinators must update signers and commission matching
+wire fixtures before activation. Historical provider digests retain replay protection, and a key
+rotated away and later restored cannot reuse an old signed-epoch signature. Timestamp and epoch
+overflow fail closed; pending proposals can be cancelled without moving the active key.
+
+Emergency disable blocks new inbound and outbound custody. It leaves queued validator changes,
+processed provider digests, fixed-recipient parked claims and their liabilities intact. Existing
+router claim settlement remains independent of adapter emergency state.
+
+Every successful source nonce records its original token, amount, destination and receive-token
+mapping atomically with dispatch. A duplicate source nonce is rejected before provider calls.
+`reconcile_outbound` only returns this source evidence and the caller's classification; every
+`ProviderStatus`, including `Failed`, has `retry_allowed=false`, `recovery_supported=false` and
+`provider_identity_available=false`. The returned reason is the caller's advisory classification,
+not a verified provider outcome. The caller supplies no verifiable
+provider proof, and the adapter implements no provider refund or safe retry operation. Missing or
+expired records cannot establish failure or permit another debit. Provider-backed recovery needs
+an independently verified protocol and migration before it can be enabled. The provider's wire
+message hash covers post-pool vUSD, while the source record retains token units. The adapter cannot
+derive that full provider digest from these fields, and never invents a vUSD amount or message hash.
+The original source nonce, token, amount, destination chain, recipient word and receive-token word
+remain unchanged in every returned record.

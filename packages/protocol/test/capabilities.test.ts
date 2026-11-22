@@ -24,6 +24,7 @@ import { describe, expect, it } from "vitest";
 import { hyperionRouterAbi } from "../src/abi/router.js";
 import { cctpAdapterAbi } from "../src/abi/cctpAdapter.js";
 import { axelarItsAdapterAbi } from "../src/abi/axelarItsAdapter.js";
+import { tokenRecoveryManagerAbi } from "../src/abi/tokenRecoveryManager.js";
 import { ROUTE_KINDS, ROUTE_SLUGS } from "../src/routes.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -377,6 +378,14 @@ const SURFACES: SurfaceCase[] = [
     status: "gated",
     kind: "evm",
     abi: axelarItsAdapterAbi,
+  },
+  {
+    file: "evm-token-recovery-manager.cap",
+    surface: "evm/token-recovery-manager",
+    contract: "TokenRecoveryManager",
+    status: "gated",
+    kind: "evm",
+    abi: tokenRecoveryManagerAbi,
   },
 ];
 

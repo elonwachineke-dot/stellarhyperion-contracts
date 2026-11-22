@@ -6,6 +6,8 @@
 
 export * from "./router.js";
 export * from "./routerInterface.js";
+export * from "./tokenRecoveryManager.js";
+export * from "./tokenRecoveryManagerInterface.js";
 export * from "./cctpAdapter.js";
 export * from "./axelarItsAdapter.js";
 export * from "./railAdapter.js";

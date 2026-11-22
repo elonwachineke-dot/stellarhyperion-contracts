@@ -12,8 +12,9 @@
  * Deprecation: a record may be marked archived by setting HYPERION_STATUS=archived together with
  * HYPERION_SUCCESSOR_ROUTER (the router that replaces it) and HYPERION_ARCHIVE_REASON. An archived
  * record keeps every historical field, including queued actions and deployedAt, so the evidence of
- * what happened is never discarded. Its status is recorded in parsed metadata (`status`,
- * `successor`), so consumers can tell active and archived records apart without string matching,
+ * what happened is never discarded. Parsed `status` and `reason` identify retired records. The
+ * replacement contract ID is retained as supplemental `successorRouter` evidence, so consumers
+ * can distinguish active and archived records without string matching,
  * and an archived record is refused as an activation target by the caller of this script.
  *
  * Reads its inputs from the environment because its caller is a shell script and marshalling two
@@ -25,176 +26,268 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  loadDeploymentProtocol,
+  storageMigrationFromEnv,
+} from "./record-evidence.mjs";
+import { rpcClient } from "./restore-plan.mjs";
+import { validateRpcUrl } from "./rollback-report.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contractsRoot = resolve(here, "..", "..");
 
-let protocol;
-try {
-  protocol = await import(resolve(contractsRoot, "packages/protocol/dist/index.js"));
-} catch (cause) {
-  throw new Error(
-    "the protocol package is not built, so the record cannot be validated. Run:\n" +
-      "  cd packages/protocol && npm install && npm run build\n" +
-      `(${String(cause)})`,
-  );
-}
-const { parseDeploymentSet, DEPLOYMENT_SCHEMA_VERSION, chain, isStellarChain } = protocol;
+export async function buildRecord(env = process.env, dependencies = {}) {
+  const protocol = await loadDeploymentProtocol();
+  const {
+    parseDeploymentSet,
+    DEPLOYMENT_SCHEMA_VERSION,
+    chain,
+    isStellarChain,
+    isStellarAddress,
+  } = protocol;
 
-const out = process.argv[2];
-if (out === undefined) throw new Error("usage: write-record.mjs <path>");
-
-function need(name) {
-  const value = process.env[name];
-  if (value === undefined || value === "") throw new Error(`${name} is not set`);
-  return value;
-}
-
-/** Hyperion's key for the network the CLI was pointed at. */
-function chainKeyFor(network) {
-  if (network === "testnet" || network === "futurenet") return "stellar-testnet";
-  if (network === "mainnet" || network === "public") return "stellar";
-  throw new Error(`no Hyperion chain key for the network "${network}"`);
-}
-
-const network = need("STELLAR_NETWORK");
-const chainKey = chainKeyFor(network);
-const entry = chain(chainKey);
-if (!isStellarChain(entry)) throw new Error(`${chainKey} is not a Stellar chain`);
-
-/**
- * The ledger the deployment landed in, asked of the network rather than guessed.
- *
- * Worth a round trip: it is the only value in the record that lets somebody line the deployment up
- * against the chain's own history, and a wrong one makes an indexer start from the wrong place.
- */
-async function latestLedger() {
-  const response = await fetch(entry.defaultRpcUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestLedger" }),
-  });
-  if (!response.ok) throw new Error(`the rpc at ${entry.defaultRpcUrl} answered ${String(response.status)}`);
-  const body = await response.json();
-  const sequence = body?.result?.sequence;
-  if (typeof sequence !== "number") throw new Error("the rpc did not return a ledger sequence");
-  return sequence;
-}
-
-/** The commit the wasm was built from. The only thing tying a contract id to a source tree. */
-function commit() {
-  try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: contractsRoot, encoding: "utf8" }).trim();
-  } catch {
-    return "unknown";
+  function need(name) {
+    const value = env[name];
+    if (value === undefined || value === "")
+      throw new Error(`${name} is not set`);
+    if (
+      typeof value !== "string" ||
+      value.length > 4096 ||
+      /[\u0000-\u001f\u007f]/.test(value)
+    )
+      throw new Error(`${name} must be bounded text`);
+    return value;
   }
-}
 
-/**
- * Lifecycle status of the record. Only two values exist on purpose: a record is either the live
- * deployment or a retired one that points at its successor. Anything else is a typo we refuse.
- */
-function lifecycle() {
-  const status = process.env.HYPERION_STATUS || "active";
-  if (status === "active") {
-    if (process.env.HYPERION_SUCCESSOR_ROUTER || process.env.HYPERION_ARCHIVE_REASON) {
-      throw new Error("an active record must not carry a successor or archive reason");
+  function integer(name, minimum = 0, maximum = 0xffffffff) {
+    const text = need(name);
+    const value = Number(text);
+    if (
+      !/^(0|[1-9][0-9]{0,9})$/.test(text) ||
+      !Number.isSafeInteger(value) ||
+      value < minimum ||
+      value > maximum
+    )
+      throw new Error(
+        `${name} must be an exact integer between ${minimum} and ${maximum}`,
+      );
+    return value;
+  }
+
+  /** Hyperion's key for the network the CLI was pointed at. */
+  function chainKeyFor(network) {
+    if (network === "testnet") return "stellar-testnet";
+    if (network === "mainnet" || network === "public") return "stellar";
+    throw new Error(`no Hyperion chain key for the network "${network}"`);
+  }
+
+  const network = need("STELLAR_NETWORK");
+  const chainKey = chainKeyFor(network);
+  const entry = chain(chainKey);
+  if (!isStellarChain(entry))
+    throw new Error(`${chainKey} is not a Stellar chain`);
+
+  /**
+   * The ledger the deployment landed in, asked of the network rather than guessed.
+   *
+   * Worth a round trip: it is the only value in the record that lets somebody line the deployment up
+   * against the chain's own history, and a wrong one makes an indexer start from the wrong place.
+   */
+  async function latestLedger() {
+    const endpoint = validateRpcUrl(env.STELLAR_RPC_URL || entry.defaultRpcUrl);
+    const rpc = dependencies.rpc ?? rpcClient(endpoint);
+    const network = await rpc("getNetwork", {});
+    if (network.passphrase !== entry.networkPassphrase)
+      throw new Error("RPC network does not match deployment network");
+    const body = await rpc("getLatestLedger", {});
+    if (
+      !Number.isSafeInteger(body.sequence) ||
+      body.sequence < 1 ||
+      body.sequence > 0xffffffff
+    )
+      throw new Error("RPC did not return an exact u32 ledger sequence");
+    return body.sequence;
+  }
+
+  /** The commit the wasm was built from. The only thing tying a contract id to a source tree. */
+  function commit() {
+    try {
+      return execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: contractsRoot,
+        encoding: "utf8",
+        timeout: 10000,
+        maxBuffer: 4096,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      return "unknown";
     }
-    return { status: "active" };
   }
-  if (status === "archived") {
-    const successorRouter = need("HYPERION_SUCCESSOR_ROUTER");
-    const reason = need("HYPERION_ARCHIVE_REASON");
-    if (successorRouter === need("HYPERION_ROUTER")) {
-      throw new Error("an archived record cannot name its own router as the successor");
+
+  // Metadata is a recorded operator claim; schema numbers never certify compatibility.
+  const migration = storageMigrationFromEnv(env);
+
+  /**
+   * Lifecycle status of the record. Only two values exist on purpose: a record is either the live
+   * deployment or a retired one that points at its successor. Anything else is a typo we refuse.
+   */
+  function lifecycle() {
+    const status = env.HYPERION_STATUS || "active";
+    if (status === "active") {
+      if (env.HYPERION_SUCCESSOR_ROUTER || env.HYPERION_ARCHIVE_REASON) {
+        throw new Error(
+          "an active record must not carry a successor or archive reason",
+        );
+      }
+      return { status: "active" };
     }
-    return {
-      status: "archived",
-      archivedAt: new Date().toISOString(),
-      archiveReason: reason,
-      successor: { router: successorRouter },
-    };
+    if (status === "archived") {
+      const successorRouter = need("HYPERION_SUCCESSOR_ROUTER");
+      const reason = need("HYPERION_ARCHIVE_REASON");
+      if (
+        !successorRouter.startsWith("C") ||
+        !isStellarAddress(successorRouter)
+      )
+        throw new Error("Successor must be a valid Stellar contract ID");
+      if (successorRouter === need("HYPERION_ROUTER")) {
+        throw new Error(
+          "an archived record cannot name its own router as the successor",
+        );
+      }
+      return {
+        status: "archived",
+        archivedAt: new Date().toISOString(),
+        reason,
+        successorRouter,
+      };
+    }
+    throw new Error(
+      `HYPERION_STATUS must be "active" or "archived", got "${status}"`,
+    );
   }
-  throw new Error(`HYPERION_STATUS must be "active" or "archived", got "${status}"`);
-}
 
-const asset = need("HYPERION_ASSET");
-const [code, issuer] = asset.split(":");
-if (code === undefined || issuer === undefined) {
-  throw new Error(`HYPERION_ASSET should read CODE:ISSUER, got "${asset}"`);
-}
+  const asset = need("HYPERION_ASSET");
+  const [code, issuer] = asset.split(":");
+  if (asset.split(":").length !== 2 || !code || !issuer) {
+    throw new Error(`HYPERION_ASSET should read CODE:ISSUER, got "${asset}"`);
+  }
 
-const adapters = {};
-if (process.env.HYPERION_CCTP) adapters.cctp = process.env.HYPERION_CCTP;
-if (process.env.HYPERION_AXELAR) adapters["axelar-its"] = process.env.HYPERION_AXELAR;
+  const adapters = {};
+  if (env.HYPERION_CCTP) adapters.cctp = env.HYPERION_CCTP;
+  if (env.HYPERION_AXELAR) adapters["axelar-its"] = env.HYPERION_AXELAR;
 
-const routes = Object.keys(adapters);
+  const routes = Object.keys(adapters);
 
-const wasmHashes = {};
-if (process.env.ROUTER_HASH) wasmHashes.router = process.env.ROUTER_HASH;
-if (process.env.CCTP_HASH && process.env.HYPERION_CCTP) wasmHashes["adapter-cctp"] = process.env.CCTP_HASH;
-if (process.env.AXELAR_HASH && process.env.HYPERION_AXELAR) {
-  wasmHashes["adapter-axelar"] = process.env.AXELAR_HASH;
-}
+  const wasmHashes = {};
+  if (env.ROUTER_HASH) wasmHashes.router = env.ROUTER_HASH;
+  if (env.CCTP_HASH && env.HYPERION_CCTP)
+    wasmHashes["adapter-cctp"] = env.CCTP_HASH;
+  if (env.AXELAR_HASH && env.HYPERION_AXELAR) {
+    wasmHashes["adapter-axelar"] = env.AXELAR_HASH;
+  }
 
-const deployment = {
-  family: "stellar",
-  networkPassphrase: entry.networkPassphrase,
-  router: need("HYPERION_ROUTER"),
-  adapters,
-  tokens: {
-    [code]: {
-      sacId: need("HYPERION_SAC"),
-      code,
-      issuer,
-      // Stellar's native precision, and the source of the one digit mismatch with USDC on EVM.
-      decimals: 7,
-      flowLimit: need("HYPERION_TOKEN_FLOW_LIMIT"),
-      routes,
+  function queue(name, valid) {
+    const text = env[name] ?? "[]";
+    if (text.length > 65536) throw new Error(`${name} exceeds input limit`);
+    const values = JSON.parse(text);
+    if (
+      !Array.isArray(values) ||
+      values.length > 128 ||
+      values.some((value) => !valid(value))
+    )
+      throw new Error(`${name} must be a bounded array of valid entries`);
+    return values;
+  }
+
+  const deployment = {
+    family: "stellar",
+    networkPassphrase: entry.networkPassphrase,
+    router: need("HYPERION_ROUTER"),
+    adapters,
+    tokens: {
+      [code]: {
+        sacId: need("HYPERION_SAC"),
+        code,
+        issuer,
+        // Stellar's native precision, and the source of the one digit mismatch with USDC on EVM.
+        decimals: 7,
+        flowLimit: need("HYPERION_TOKEN_FLOW_LIMIT"),
+        routes,
+      },
     },
-  },
-  treasury: need("HYPERION_TREASURY"),
-  admin: need("HYPERION_ADMIN"),
-  guardian: need("HYPERION_GUARDIAN"),
-  feeBps: Number(need("HYPERION_FEE_BPS")),
-  // Ledgers on this side, seconds on the EVM side. The field name is the same and the unit is not,
-  // which is worth remembering every single time.
-  flowWindow: Number(need("HYPERION_FLOW_WINDOW_LEDGERS")),
-  timelockDelay: Number(need("HYPERION_TIMELOCK_DELAY")),
-  wasmHashes,
-  deployedAt: {
-    ledger:
-      process.env.HYPERION_ROUTER_LEDGER || process.env.ROUTER_LEDGER || process.env.STELLAR_START_LEDGER
-        ? Number(
-            process.env.HYPERION_ROUTER_LEDGER ||
-              process.env.ROUTER_LEDGER ||
-              process.env.STELLAR_START_LEDGER,
-          )
-        : await latestLedger(),
-    timestamp: new Date().toISOString(),
-  },
-  commit: commit(),
-  ...lifecycle(),
+    treasury: need("HYPERION_TREASURY"),
+    admin: need("HYPERION_ADMIN"),
+    guardian: need("HYPERION_GUARDIAN"),
+    feeBps: integer("HYPERION_FEE_BPS", 0, 100),
+    // Ledgers on this side, seconds on the EVM side. The field name is the same and the unit is not,
+    // which is worth remembering every single time.
+    flowWindow: integer("HYPERION_FLOW_WINDOW_LEDGERS", 1),
+    timelockDelay: integer("HYPERION_TIMELOCK_DELAY"),
+    wasmHashes,
+    deployedAt: {
+      ledger:
+        env.HYPERION_ROUTER_LEDGER ||
+        env.ROUTER_LEDGER ||
+        env.STELLAR_START_LEDGER
+          ? integer(
+              env.HYPERION_ROUTER_LEDGER
+                ? "HYPERION_ROUTER_LEDGER"
+                : env.ROUTER_LEDGER
+                  ? "ROUTER_LEDGER"
+                  : "STELLAR_START_LEDGER",
+              1,
+            )
+          : await latestLedger(),
+      timestamp: new Date().toISOString(),
+    },
+    commit: commit(),
+    ...lifecycle(),
+    ...(migration !== null ? { storageMigration: migration } : {}),
 
-  // Phase two reads these, and a reviewer checks them against the chain. The validator ignores
-  // fields it does not know about, which is what lets a record carry handover state as well as
-  // addresses. Queued actions are kept on archived records too: they are historical evidence.
-  deployer: need("HYPERION_DEPLOYER"),
-  peerChain: need("HYPERION_PEER_CHAIN"),
-  queuedActionIds: JSON.parse(process.env.QUEUE_IDS_JSON ?? "[]"),
-  queuedActions: JSON.parse(process.env.QUEUE_WHAT_JSON ?? "[]"),
-};
+    // Phase two reads these, and a reviewer checks them against the chain. The validator ignores
+    // fields it does not know about, which is what lets a record carry handover state as well as
+    // addresses. Queued actions are kept on archived records too: they are historical evidence.
+    deployer: need("HYPERION_DEPLOYER"),
+    peerChain: need("HYPERION_PEER_CHAIN"),
+    queuedActionIds: queue(
+      "QUEUE_IDS_JSON",
+      (value) => Number.isSafeInteger(value) && value >= 0,
+    ),
+    queuedActions: queue(
+      "QUEUE_WHAT_JSON",
+      (value) => typeof value === "string" && value.length <= 2048,
+    ),
+  };
 
-const record = {
-  schemaVersion: DEPLOYMENT_SCHEMA_VERSION,
-  generatedAt: new Date().toISOString(),
-  networks: { [chainKey]: deployment },
-};
+  const record = {
+    schemaVersion: DEPLOYMENT_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    networks: { [chainKey]: deployment },
+  };
 
-// The whole reason this file exists rather than a heredoc in the shell script.
-parseDeploymentSet(record);
+  // The whole reason this file exists rather than a heredoc in the shell script.
+  parseDeploymentSet(record);
 
-mkdirSync(dirname(resolve(out)), { recursive: true });
-writeFileSync(resolve(out), `${JSON.stringify(record, null, 2)}\n`);
-process.stdout.write(`validated and written: ${out}\n`);
+  return record;
+}
+
+export async function runCli(args = process.argv.slice(2)) {
+  const [out, ...extra] = args;
+  if (!out || out.length > 4096 || extra.length)
+    throw new Error("usage: write-record.mjs <path>");
+  const record = await buildRecord();
+  mkdirSync(dirname(resolve(out)), { recursive: true });
+  writeFileSync(resolve(out), `${JSON.stringify(record, null, 2)}\n`);
+  process.stdout.write(`validated and written: ${out}\n`);
+  return record;
+}
+if (
+  process.argv[1] &&
+  pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+) {
+  runCli().catch((error) => {
+    process.stderr.write(`failed: ${error.message}\n`);
+    process.exitCode = 1;
+  });
+}

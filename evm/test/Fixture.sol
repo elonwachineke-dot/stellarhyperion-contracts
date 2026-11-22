@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {HyperionRouter} from "../src/HyperionRouter.sol";
 import {ActionKind, AdminAction, Destination, OutboundRequest, RouteKind} from "../src/HyperionTypes.sol";
+import {ITokenRecoveryManager} from "../src/interfaces/ITokenRecoveryManager.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockRailAdapter} from "./mocks/MockRailAdapter.sol";
 
@@ -68,6 +69,7 @@ contract Fixture is Test {
     address internal railReceiver = makeAddr("railReceiver");
 
     HyperionRouter internal router;
+    ITokenRecoveryManager internal recoveryManager;
     MockERC20 internal usdc;
 
     /// @dev Read once, here, rather than in each test that names a role. `expectRevert` watches
@@ -84,6 +86,10 @@ contract Fixture is Test {
     function setUp() public virtual {
         _configureProviderFaults(156);
         router = new HyperionRouter(admin, guardian, treasury, FEE_BPS, TIMELOCK, FLOW_WINDOW);
+        address recoveryAddress =
+            address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"02")))));
+        recoveryManager = ITokenRecoveryManager(recoveryAddress);
+        assertEq(recoveryManager.ROUTER(), address(router));
         usdc = new MockERC20("USD Coin", "USDC", USDC_DECIMALS);
 
         adminRole = router.DEFAULT_ADMIN_ROLE();

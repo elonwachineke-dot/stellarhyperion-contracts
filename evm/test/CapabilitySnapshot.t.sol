@@ -25,6 +25,7 @@ contract CapabilitySnapshotTest is Fixture {
     string internal constant ROUTER_SNAPSHOT = "../testdata/capabilities/evm-router.cap";
     string internal constant CCTP_SNAPSHOT = "../testdata/capabilities/evm-cctp-adapter.cap";
     string internal constant AXELAR_SNAPSHOT = "../testdata/capabilities/evm-axelar-adapter.cap";
+    string internal constant RECOVERY_SNAPSHOT = "../testdata/capabilities/evm-token-recovery-manager.cap";
 
     function testRouterAdvertisesOnlyRoutesItCanReach() public view {
         string[] memory slugs = _values(ROUTER_SNAPSHOT, "route");
@@ -38,12 +39,13 @@ contract CapabilitySnapshotTest is Fixture {
 
     function testPaidEntryPointsNamedInTheSnapshotAreCallable() public view {
         string[] memory paid = _values(ROUTER_SNAPSHOT, "paid-method");
-        assertEq(paid.length, 5, "unexpected number of paid entry points");
+        assertEq(paid.length, 6, "unexpected number of paid entry points");
         assertTrue(_contains(paid, "bridgeOut"), "bridgeOut is not declared");
         assertTrue(_contains(paid, "bridgeOutBounded"), "bridgeOutBounded is not declared");
         assertTrue(_contains(paid, "bridgeOutWithPermit"), "bridgeOutWithPermit is not declared");
         assertTrue(_contains(paid, "bridgeOutWithRefundCredit"), "bridgeOutWithRefundCredit is not declared");
         assertTrue(_contains(paid, "bridgeOutWithIntent"), "bridgeOutWithIntent is not declared");
+        assertTrue(_contains(paid, "bridgeOutWithRelayerFee"), "bridgeOutWithRelayerFee is not declared");
         // A selector reference stops compiling if the entry point is removed, which is the whole
         // point of naming them here as well as in the snapshot.
         bytes4 legacy = HyperionRouter.bridgeOut.selector;
@@ -51,9 +53,10 @@ contract CapabilitySnapshotTest is Fixture {
         bytes4 permit = HyperionRouter.bridgeOutWithPermit.selector;
         bytes4 credit = HyperionRouter.bridgeOutWithRefundCredit.selector;
         bytes4 intent = HyperionRouter.bridgeOutWithIntent.selector;
+        bytes4 relayerFee = HyperionRouter.bridgeOutWithRelayerFee.selector;
         assertTrue(
             legacy != bytes4(0) && bounded != bytes4(0) && permit != bytes4(0) && credit != bytes4(0)
-                && intent != bytes4(0),
+                && intent != bytes4(0) && relayerFee != bytes4(0),
             "paid selectors are empty"
         );
     }
@@ -81,6 +84,7 @@ contract CapabilitySnapshotTest is Fixture {
         assertEq(_single(ROUTER_SNAPSHOT, "status"), "gated", "the EVM router must stay gated");
         assertEq(_single(CCTP_SNAPSHOT, "status"), "gated", "the EVM CCTP adapter must stay gated");
         assertEq(_single(AXELAR_SNAPSHOT, "status"), "gated", "the EVM Axelar adapter must stay gated");
+        assertEq(_single(RECOVERY_SNAPSHOT, "status"), "gated", "the EVM recovery manager must stay gated");
     }
 
     // -------------------------------------------------------------------------------------

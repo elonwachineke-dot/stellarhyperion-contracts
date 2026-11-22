@@ -10,11 +10,13 @@ import {
     InvalidDestination,
     RailNotConfigured,
     RefundFailed,
+    ReplayedMessage,
     TimelockDelayOutOfRange,
     TimelockNotQueued,
     TimelockNotReady,
     TokenNotMapped,
     Unauthorized,
+    UnexpectedRailContract,
     UnknownChain,
     ZeroAddress
 } from "../../src/HyperionErrors.sol";
@@ -23,6 +25,7 @@ import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {Fixture} from "../Fixture.sol";
 import {DeafRouter} from "../mocks/HostileCallers.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockMessageTransmitter} from "../mocks/MockMessageTransmitter.sol";
 import {MockTokenMessenger} from "../mocks/MockTokenMessenger.sol";
 import {Vm} from "forge-std/Vm.sol";
 
@@ -72,6 +75,7 @@ contract CctpAdapterTest is Fixture {
 
     CctpAdapter internal adapter;
     MockTokenMessenger internal messenger;
+    MockMessageTransmitter internal transmitter;
 
     event ApprovalAudited(
         address indexed token, address indexed spender, uint256 beforeValue, uint256 afterValue, bool clean
@@ -89,10 +93,21 @@ contract CctpAdapterTest is Fixture {
     function setUp() public override {
         super.setUp();
         messenger = new MockTokenMessenger();
+        transmitter = new MockMessageTransmitter(address(usdc), 1);
         adapter = new CctpAdapter(address(router), address(messenger), address(usdc), admin);
 
-        vm.prank(admin);
+        vm.startPrank(admin);
+        adapter.setMessageTransmitter(address(transmitter));
+        adapter.setInboundLane(
+            STELLAR_DOMAIN,
+            STELLAR,
+            keccak256("remote Circle TokenMessenger"),
+            MINT_RECIPIENT,
+            keccak256("remote USDC")
+        );
         adapter.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT);
+        vm.stopPrank();
+        _setRailReceiver(RouteKind.Cctp, address(adapter));
     }
 
     // -------------------------------------------------------------------------------------
@@ -104,6 +119,85 @@ contract CctpAdapterTest is Fixture {
         assertEq(address(adapter.TOKEN_MESSENGER()), address(messenger));
         assertEq(adapter.USDC(), address(usdc));
         assertEq(adapter.owner(), admin);
+    }
+
+    function _message(address recipient, uint64 sourceNonce, bytes32 nonce, bytes32 sender, bytes32 burnToken)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes memory header = abi.encodePacked(
+            uint32(1),
+            uint32(27),
+            uint32(1),
+            nonce,
+            keccak256("remote Circle TokenMessenger"),
+            bytes32(uint256(uint160(address(messenger)))),
+            bytes32(0),
+            uint32(2000),
+            uint32(2000)
+        );
+        bytes memory burn = abi.encodePacked(
+            uint32(1),
+            burnToken,
+            bytes32(uint256(uint160(address(adapter)))),
+            uint256(AMOUNT),
+            sender,
+            uint256(0),
+            uint256(0),
+            uint256(0)
+        );
+        return bytes.concat(header, burn, abi.encodePacked(uint8(1), bytes20(recipient), sourceNonce));
+    }
+
+    function _validMessage(bytes32 nonce, bytes32 sender) internal view returns (bytes memory) {
+        return _message(bob, 4242, nonce, sender, keccak256("remote USDC"));
+    }
+
+    function test_receive_delivers_attested_usdc_and_records_fixed_recipient() public {
+        bytes32 nonce = keccak256("cctp inbound 1");
+        bytes memory message = _validMessage(nonce, MINT_RECIPIENT);
+        uint64 claimId = adapter.receiveMessage(message, hex"51");
+
+        assertEq(claimId, 0);
+        assertEq(usdc.balanceOf(bob), AMOUNT);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+    }
+
+    function test_receive_duplicate_message_is_refused() public {
+        bytes32 nonce = keccak256("cctp duplicate");
+        bytes memory message = _validMessage(nonce, MINT_RECIPIENT);
+        adapter.receiveMessage(message, hex"51");
+
+        vm.expectRevert(ReplayedMessage.selector);
+        adapter.receiveMessage(message, hex"51");
+    }
+
+    function test_receive_forged_remote_sender_is_refused() public {
+        bytes memory message = _validMessage(keccak256("cctp forged"), bytes32(uint256(0xdead)));
+        vm.expectRevert(UnexpectedRailContract.selector);
+        adapter.receiveMessage(message, hex"51");
+    }
+
+    function test_receive_failed_payout_creates_fixed_recipient_claim() public {
+        usdc.setBlocked(bob, true);
+        bytes32 nonce = keccak256("cctp recipient failure");
+
+        uint64 claimId = adapter.receiveMessage(_validMessage(nonce, MINT_RECIPIENT), hex"51");
+
+        assertEq(claimId, 1);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+        assertEq(usdc.balanceOf(bob), 0);
+        assertEq(router.claimCount(), 1);
+        assertEq(uint256(router.claimFailureReason(1)), 1);
+    }
+
+    function test_receive_mismatched_burn_token_is_refused() public {
+        bytes32 nonce = keccak256("cctp mismatched token");
+        bytes32 wrongToken = keccak256("not USDC");
+        bytes memory message = _message(bob, 4242, nonce, MINT_RECIPIENT, wrongToken);
+        vm.expectRevert(TokenNotMapped.selector);
+        adapter.receiveMessage(message, hex"51");
     }
 
     function test_constructor_refuses_a_zero_router() public {

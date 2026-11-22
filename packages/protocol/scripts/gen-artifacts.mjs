@@ -45,6 +45,18 @@ const TARGETS = [
     symbol: "hyperionRouterInterfaceAbi",
   },
   {
+    contract: "TokenRecoveryManager",
+    file: "TokenRecoveryManager.sol",
+    module: "tokenRecoveryManager",
+    symbol: "tokenRecoveryManagerAbi",
+  },
+  {
+    contract: "ITokenRecoveryManager",
+    file: "ITokenRecoveryManager.sol",
+    module: "tokenRecoveryManagerInterface",
+    symbol: "tokenRecoveryManagerInterfaceAbi",
+  },
+  {
     contract: "CctpAdapter",
     file: "CctpAdapter.sol",
     module: "cctpAdapter",
@@ -67,6 +79,12 @@ const TARGETS = [
 
 /** Where the free standing error declarations live, in the order a reviewer reads them. */
 const ERRORS_SOURCE = join(evmRoot, "src", "HyperionErrors.sol");
+
+// Immutable support errors bubble through router static calls even when solc omits them
+// from the router's own ABI. Collect their compiled signatures without exporting a new API.
+const SUPPORT_ERROR_ARTIFACTS = [
+  { file: "OutboundProvenance.sol", contract: "OutboundProvenance" },
+];
 
 function readArtifact(file, contract) {
   const path = join(artifactRoot, file, `${contract}.json`);
@@ -246,7 +264,10 @@ async function main() {
   }
 
   const errorNames = readErrorNames();
-  const selectors = await collectErrorSelectors(loaded.map(({ abi }) => abi));
+  const supportAbis = SUPPORT_ERROR_ARTIFACTS.map(({ file, contract }) =>
+    readArtifact(file, contract),
+  );
+  const selectors = await collectErrorSelectors([...loaded.map(({ abi }) => abi), ...supportAbis]);
   writeFileSync(join(abiDir, "errors.ts"), emitErrorsModule(errorNames, selectors));
   written.push("errors.ts");
 
@@ -263,7 +284,7 @@ async function main() {
     `wrote ${String(written.length)} modules to src/abi: ${written.join(", ")}\n`,
   );
   process.stdout.write(
-    `${String(errorNames.length)} declared errors, ${String(selectors.length)} distinct selectors across ${String(loaded.length)} artifacts\n`,
+    `${String(errorNames.length)} declared errors, ${String(selectors.length)} distinct selectors across ${String(loaded.length + supportAbis.length)} artifacts\n`,
   );
   if (stale.length > 0) {
     process.stdout.write(`note: src/abi holds files this run did not write: ${stale.join(", ")}\n`);

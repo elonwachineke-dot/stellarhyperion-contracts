@@ -195,3 +195,11 @@ fi
 say "Historical cleanup: claim_history distinguishes Live, intentional Archived(id), and Unavailable (restore via RPC)."
 say "Cost capture (read-only): node script/stellar/storage-cost.mjs --rpc RPC_URL --request recorded-keysets.json"
 say "Cost replay: node script/stellar/storage-cost.mjs --record recorded-rpc.json"
+
+note "rollback feasibility"
+say "Read-only report — signs nothing, executes nothing:"
+say "  node script/stellar/rollback-report.mjs $RECORD"
+say "With network/executable-bound live schema evidence (still requires compatibility review):"
+say "  node script/stellar/rollback-report.mjs $RECORD --rpc \$RPC_URL --source-account PUBLIC_G_ADDRESS"
+say "Compare two records (old → new upgrade path):"
+say "  node script/stellar/rollback-report.mjs --from <archive-record> --to $RECORD"

@@ -126,6 +126,35 @@ contract RouterInboundTest is Fixture {
         assertEq(fot.balanceOf(bob), DELIVERY);
     }
 
+    function test_short_inbound_custody_transfer_rolls_back_replay_and_cannot_park_a_claim() public {
+        FeeOnTransferToken fot = _hostileInbound();
+        fot.configure(address(router), 500, false, false);
+        bytes32 replayKey = keccak256(abi.encode(RouteKind.Cctp, MESSAGE_ID));
+
+        vm.prank(railReceiver);
+        vm.expectRevert(InvalidAmount.selector);
+        router.bridgeIn(RouteKind.Cctp, address(fot), DELIVERY, bob, _origin(MESSAGE_ID));
+
+        assertEq(fot.balanceOf(railReceiver), 1000e6);
+        assertEq(fot.balanceOf(address(router)), 0);
+        assertEq(fot.balanceOf(bob), 0);
+        assertEq(fot.balanceOf(address(0xdead)), 0);
+        assertEq(router.claimCount(), 0);
+        assertEq(recoveryManager.claimLiability(address(fot)), 0);
+        assertFalse(router.processed(replayKey));
+
+        fot.configure(bob, 0, false, false);
+        vm.prank(railReceiver);
+        uint64 claimId = router.bridgeIn(RouteKind.Cctp, address(fot), DELIVERY, bob, _origin(MESSAGE_ID));
+
+        assertEq(claimId, 0);
+        assertEq(fot.balanceOf(railReceiver), 1000e6 - DELIVERY);
+        assertEq(fot.balanceOf(address(router)), 0);
+        assertEq(fot.balanceOf(bob), DELIVERY);
+        assertEq(recoveryManager.claimLiability(address(fot)), 0);
+        assertTrue(router.processed(replayKey));
+    }
+
     function test_a_false_return_after_moving_funds_cannot_create_an_unfunded_claim() public {
         FeeOnTransferToken fot = _hostileInbound();
         fot.configure(bob, 0, false, true);

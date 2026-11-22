@@ -123,6 +123,47 @@ recipient, and a later successful retry clears the reason. Soroban's documented 
 rollback for successful nonconforming token changes remains different because its host does not
 support the EVM item's invocation rollback mechanism. These local changes activate no deployment.
 
+## EVM inbound custody reconciliation
+
+Before attempting a payout or parking a claim, `bridgeIn` snapshots both the authenticated
+receiver's balance and the router's balance. It requires the receiver's debit and router's actual
+credit to each equal the exact requested integer amount. A short transfer, extra debit, or
+unreadable/inexact post-transfer state reverts the entire inbound transaction, including its
+replay marker; it cannot create an underfunded claim. A successful payout is separately checked
+for exact debit and recipient credit. A refusing recipient is parked only if the failed payout
+left both balances unchanged.
+
+The EVM regression fixture exercises a fee-on-transfer token that short-pays the router during
+the initial custody pull, then retries the identical message after restoring exact transfer
+behavior. Canonical supported-token deliveries retain their exact amount. This adds no interface,
+storage, or wire-format change and requires no state migration. EVM remains development-only;
+Stellar Testnet outbound ITS/CCTP remains active, and this work does not authorize EVM activation.
+
+## EVM-development accidental-token recovery
+
+The router-owned `TokenRecoveryManager` is deployed at CREATE nonce 2 and its address and code
+hash are recorded by the EVM deployment scripts. Verification requires both fields when this
+child exists and checks its immutable router binding; a missing or partial record fails closed.
+Legacy absence is permitted only when there is no recovery child. Only the router admin can queue and execute a
+recovery; the router guardian or admin can cancel it. A proposal records a fixed token, recipient,
+and exact integer amount, waits for the current router timelock, and expires after its grace
+period. Queue, cancellation, execution, and the complete proposal are observable through manager
+events and its read methods.
+
+Registered router tokens are never recoverable, even when disabled or currently holding no
+claims. For unregistered tokens, recoverable amount is capped at actual router balance minus the
+manager's tracked outstanding claim liability. Claim liabilities increase only when a delivery
+is parked and decrease only after exact settlement. Execution rechecks token registration and
+surplus, and the router enforces exact token debit and recipient credit under its reentrancy guard.
+Fee-on-transfer or otherwise inexact recoveries revert atomically.
+
+This adds a new manager contract and router callback selector; it does not change existing transfer
+or claim selectors, amount formats, replay keys, or claim recipients. Existing non-upgradeable
+router deployments cannot gain the manager or its historical liability accounting in place.
+Their existing claims remain on their original router; any replacement deployment or claim
+migration requires a separate reviewed process. EVM remains development-only and no activation is
+authorized.
+
 ## EVM-development Axelar ITS gas top-ups
 
 Each EVM Axelar ITS dispatch records a fixed-size intent keyed by the router nonce, adapter,

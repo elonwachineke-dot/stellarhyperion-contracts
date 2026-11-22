@@ -16,10 +16,16 @@ contract MockGasService is IAxelarGasService {
 
     TopUp private _last;
     uint256 public topUpCount;
+    bool public revertsAfterReceipt;
+
+    function setRevertsAfterReceipt(bool value) external {
+        revertsAfterReceipt = value;
+    }
 
     function addNativeGas(bytes32 txHash, uint256 logIndex, address refundAddress) external payable override {
         _last = TopUp({txHash: txHash, logIndex: logIndex, refundAddress: refundAddress, value: msg.value});
         ++topUpCount;
+        if (revertsAfterReceipt) revert("gas service failed after receipt");
     }
 
     function lastTopUp() external view returns (TopUp memory) {

@@ -315,6 +315,13 @@ interface IHyperionRouter {
         external
         returns (ClaimSettlementResult[] memory results);
 
+    /// @notice Complete the exact transfer authorized by the router-owned recovery manager.
+    /// @dev Only the manager deployed at router CREATE nonce 2 may call this guarded hook.
+    /// @param token The unregistered ERC20 whose surplus is authorized for recovery.
+    /// @param recipient The fixed recipient authorized by the queued recovery.
+    /// @param amount The exact amount to transfer in token base units.
+    function completeTokenRecovery(address token, address recipient, uint256 amount) external;
+
     /// @notice Dispatch with a native provider cap while preserving legacy request fields.
     /// @param request The legacy outbound request.
     /// @param maxProviderBudget Maximum msg.value passed to the provider, in native-currency wei.
@@ -342,6 +349,39 @@ interface IHyperionRouter {
     /// @param intent The complete typed transfer intent.
     /// @return The chain/router-bound digest.
     function hashTransferIntent(TransferIntent calldata intent) external view returns (bytes32);
+
+    /// @notice Execute an intent with a separately signed exact relayer fee cap.
+    /// @dev The signature covers the legacy intent digest, fee token and charge.
+    /// @param intent The outbound intent sharing the sender's legacy nonce.
+    /// @param signature The sender's signature over the transfer digest, fee asset and charge.
+    /// @param feeToken The signed enabled ERC-20 fee asset, or zero for no charge.
+    /// @param maxRelayerCharge The signed exact charge paid on successful dispatch.
+    /// @return nonce The successful outbound dispatch nonce.
+    function bridgeOutWithRelayerFee(
+        TransferIntent calldata intent,
+        bytes calldata signature,
+        address feeToken,
+        uint256 maxRelayerCharge
+    ) external payable returns (uint64 nonce);
+
+    /// @notice Hash a fee-bearing intent in this router's EIP-712 domain.
+    /// @param intent The immutable outbound transfer authorization.
+    /// @param feeToken The signed fee asset.
+    /// @param maxRelayerCharge The signed exact relayer charge.
+    function hashTransferIntentWithRelayerFee(
+        TransferIntent calldata intent,
+        address feeToken,
+        uint256 maxRelayerCharge
+    ) external view returns (bytes32);
+
+    /// @notice The signed fee was paid after successful dispatch, in the same atomic transaction.
+    /// @param sender The sender who authorized and paid the charge.
+    /// @param feeToken The ERC-20 asset used for the charge.
+    /// @param relayer The executing relayer receiving the charge.
+    /// @param amount The exact signed charge.
+    event RelayerFeePaid(
+        address indexed sender, address indexed feeToken, address indexed relayer, uint256 amount
+    );
 
     /// @notice Return zero for passing local bounded checks, otherwise the earliest error selector.
     /// @param request The legacy outbound request.
@@ -393,6 +433,12 @@ interface IHyperionRouter {
     /// @notice Apply a proposed change that has waited long enough and has not expired.
     /// @param id The action to apply.
     function executeAction(uint64 id) external;
+
+    /// @notice Current delay applied to new router governance and recovery proposals.
+    function timelockDelay() external view returns (uint64);
+
+    /// @notice Execution grace period after a queued action matures.
+    function GRACE_PERIOD() external view returns (uint64);
 
     /// @notice Drop a proposed change.
     /// @param id The action to drop.

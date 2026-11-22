@@ -2,9 +2,11 @@
 pragma solidity 0.8.28;
 
 import {
+    FeeTokenNotSupported,
     IntentDomainMismatch,
     IntentExpired,
     IntentNonceMismatch,
+    InvalidRelayerFee,
     InvalidSignature,
     ProviderBudgetExceeded,
     RefundFailed,
@@ -14,6 +16,7 @@ import {HyperionRouter} from "../../src/HyperionRouter.sol";
 import {OutboundRecord, OutboundRequest, RouteKind, TransferIntent} from "../../src/HyperionTypes.sol";
 import {Fixture} from "../Fixture.sol";
 import {MockRailAdapter} from "../mocks/MockRailAdapter.sol";
+import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
 import {Pausable} from "openzeppelin/utils/Pausable.sol";
 
 contract IntentRefundReenter {
@@ -30,6 +33,31 @@ contract IntentRefundReenter {
     function _reenter() private {
         OutboundRequest memory request;
         TARGET.bridgeOutBounded(request, 0);
+    }
+}
+
+/// @notice A local fee asset that models both extra sender debit and false successful transfer.
+contract RelayerSkewAsset is ERC20 {
+    bool public phantom;
+    bool public tax;
+
+    constructor(address holder) ERC20("Fee", "FEE") {
+        _mint(holder, 10 ether);
+    }
+
+    function setMode(bool phantom_, bool tax_) external {
+        phantom = phantom_;
+        tax = tax_;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        if (phantom) return true;
+        return super.transferFrom(from, to, amount);
+    }
+
+    function _update(address from, address to, uint256 amount) internal override {
+        if (tax && from != address(0) && to != address(0)) super._update(from, address(0), 1);
+        super._update(from, to, amount);
     }
 }
 
@@ -201,6 +229,197 @@ contract RouterTransferIntentTest is Fixture {
         // The documented 0/1 recovery-byte normalization remains supported.
         router.bridgeOutWithIntent(intent, abi.encodePacked(r, s, uint8(v - 27)));
         assertEq(router.intentNonce(alice), 1);
+    }
+
+    function test_feeTypedDigestAndExactSeparatePaymentOnBothRails() public {
+        for (uint256 i; i < 2; ++i) {
+            TransferIntent memory intent = _intent();
+            intent.route = RouteKind(i);
+            intent.minDestinationAmount = 999e7;
+            bytes32 digest = _feeDigest(intent, address(usdc), 3e6);
+            assertEq(router.hashTransferIntentWithRelayerFee(intent, address(usdc), 3e6), digest);
+            uint256 before = usdc.balanceOf(alice);
+            vm.prank(stranger);
+            uint64 nonce = router.bridgeOutWithRelayerFee(
+                intent, _feeSign(intent, address(usdc), 3e6), address(usdc), 3e6
+            );
+            assertEq(usdc.balanceOf(alice), before - 1003e6);
+            assertEq(usdc.balanceOf(stranger), (i + 1) * 3e6);
+            assertEq(router.outboundRecord(nonce).netAmount, 999e6);
+            assertEq(router.intentNonce(alice), i + 1);
+        }
+    }
+
+    function test_feeAssetAndCapCannotBeSubstituted() public {
+        TransferIntent memory intent = _intent();
+        bytes memory signature = _feeSign(intent, address(usdc), 3e6);
+        vm.prank(stranger);
+        vm.expectRevert(InvalidSignature.selector);
+        router.bridgeOutWithRelayerFee(intent, signature, address(usdc), 3e6 + 1);
+        vm.prank(stranger);
+        vm.expectRevert(InvalidSignature.selector);
+        router.bridgeOutWithRelayerFee(intent, signature, bob, 3e6);
+        assertEq(router.intentNonce(alice), 0);
+        assertEq(router.outboundNonce(), 0);
+    }
+
+    function test_feeSignatureCannotMutateInnerTransferMinimum() public {
+        TransferIntent memory intent = _intent();
+        bytes memory signature = _feeSign(intent, address(usdc), 3e6);
+        intent.minDestinationAmount = 1;
+        vm.prank(stranger);
+        vm.expectRevert(InvalidSignature.selector);
+        router.bridgeOutWithRelayerFee(intent, signature, address(usdc), 3e6);
+        assertEq(router.outboundNonce(), 0);
+    }
+
+    function test_feeAndLegacyAuthorizationCannotBeInterchangedAndShareNonce() public {
+        TransferIntent memory intent = _intent();
+        bytes memory legacy = _sign(intent);
+        bytes memory fee = _feeSign(intent, address(0), 0);
+        vm.prank(stranger);
+        vm.expectRevert(InvalidSignature.selector);
+        router.bridgeOutWithRelayerFee(intent, legacy, address(0), 0);
+        vm.prank(stranger);
+        vm.expectRevert(InvalidSignature.selector);
+        router.bridgeOutWithIntent(intent, fee);
+        vm.prank(stranger);
+        router.bridgeOutWithRelayerFee(intent, fee, address(0), 0);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(IntentNonceMismatch.selector, 1, 0));
+        router.bridgeOutWithIntent(intent, legacy);
+        assertEq(router.outboundNonce(), 1);
+    }
+
+    function test_feeTokensUnregisteredDisabledAndNoncanonicalZeroAreRejectedBeforeDebit() public {
+        TransferIntent memory intent = _intent();
+        bytes memory missing = _feeSign(intent, bob, 1);
+        vm.prank(stranger);
+        vm.expectRevert(FeeTokenNotSupported.selector);
+        router.bridgeOutWithRelayerFee(intent, missing, bob, 1);
+        bytes memory zero = _feeSign(intent, address(usdc), 0);
+        vm.prank(stranger);
+        vm.expectRevert(InvalidRelayerFee.selector);
+        router.bridgeOutWithRelayerFee(intent, zero, address(usdc), 0);
+        _setTokenEnabled(address(usdc), false);
+        intent = _intent();
+        bytes memory disabled = _feeSign(intent, address(usdc), 1);
+        vm.prank(stranger);
+        vm.expectRevert(FeeTokenNotSupported.selector);
+        router.bridgeOutWithRelayerFee(intent, disabled, address(usdc), 1);
+        assertEq(router.intentNonce(alice), 0);
+        assertEq(router.outboundNonce(), 0);
+    }
+
+    function test_feePaymentFailureRollsBackCompletedProviderCallAndAllNonceFlowState() public {
+        TransferIntent memory intent = _intent();
+        bytes memory signature = _feeSign(intent, address(usdc), 3e6);
+        uint256 flow = router.flowAvailable(address(usdc), RouteKind.Cctp);
+        usdc.setBlocked(stranger, true);
+        vm.prank(stranger);
+        vm.expectRevert();
+        router.bridgeOutWithRelayerFee(intent, signature, address(usdc), 3e6);
+        _assertRollback(flow);
+        assertEq(usdc.balanceOf(stranger), 0);
+        usdc.setBlocked(stranger, false);
+        vm.prank(stranger);
+        router.bridgeOutWithRelayerFee(intent, signature, address(usdc), 3e6);
+        assertEq(usdc.balanceOf(stranger), 3e6);
+        assertEq(cctpRail.callCount(), 1);
+    }
+
+    function test_feeStillEnforcesPauseExpiryAndProviderBudget() public {
+        TransferIntent memory intent = _intent();
+        bytes memory signature = _feeSign(intent, address(usdc), 3e6);
+        vm.prank(stranger);
+        vm.expectRevert(ProviderBudgetExceeded.selector);
+        router.bridgeOutWithRelayerFee{value: intent.maxProviderBudget + 1}(
+            intent, signature, address(usdc), 3e6
+        );
+        vm.prank(guardian);
+        router.pause();
+        vm.prank(stranger);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        router.bridgeOutWithRelayerFee(intent, signature, address(usdc), 3e6);
+        vm.prank(admin);
+        router.unpause();
+        vm.warp(intent.deadline + 1);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(IntentExpired.selector, intent.deadline));
+        router.bridgeOutWithRelayerFee(intent, signature, address(usdc), 3e6);
+        assertEq(router.intentNonce(alice), 0);
+    }
+
+    function test_nonzeroSelfPaidFeeCannotPassExactDebitAndCreditRequirements() public {
+        TransferIntent memory intent = _intent();
+        bytes memory signature = _feeSign(intent, address(usdc), 3e6);
+        vm.prank(alice);
+        vm.expectRevert(InvalidRelayerFee.selector);
+        router.bridgeOutWithRelayerFee(intent, signature, address(usdc), 3e6);
+        assertEq(router.outboundNonce(), 0);
+    }
+
+    function test_extraSenderDebitAndPhantomFeeTransferRevertProviderAndBalances() public {
+        RelayerSkewAsset fee = new RelayerSkewAsset(alice);
+        _registerToken(address(fee), 18, type(uint128).max);
+        vm.prank(alice);
+        fee.approve(address(router), type(uint256).max);
+        TransferIntent memory intent = _intent();
+        bytes memory signature = _feeSign(intent, address(fee), 1 ether);
+        uint256 flow = router.flowAvailable(address(usdc), RouteKind.Cctp);
+        for (uint256 i; i < 2; ++i) {
+            fee.setMode(i == 0, i == 1);
+            vm.prank(stranger);
+            vm.expectRevert(InvalidRelayerFee.selector);
+            router.bridgeOutWithRelayerFee(intent, signature, address(fee), 1 ether);
+            _assertRollback(flow);
+            assertEq(fee.balanceOf(alice), 10 ether);
+            assertEq(fee.balanceOf(stranger), 0);
+        }
+        fee.setMode(false, false);
+        vm.prank(stranger);
+        router.bridgeOutWithRelayerFee(intent, signature, address(fee), 1 ether);
+        assertEq(fee.balanceOf(alice), 9 ether);
+        assertEq(fee.balanceOf(stranger), 1 ether);
+        assertEq(router.outboundRecord(1).netAmount, 999e6);
+    }
+
+    function _feeSign(TransferIntent memory intent, address feeToken, uint256 charge)
+        private
+        view
+        returns (bytes memory)
+    {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, _feeDigest(intent, feeToken, charge));
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _feeDigest(TransferIntent memory intent, address feeToken, uint256 charge)
+        private
+        view
+        returns (bytes32)
+    {
+        bytes32 domain = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256("HyperionRouter"),
+                keccak256("1"),
+                block.chainid,
+                address(router)
+            )
+        );
+        bytes32 body = keccak256(
+            abi.encode(
+                keccak256(
+                    "RelayerFeeIntent(bytes32 transferIntentHash,address feeToken,uint256 maxRelayerCharge)"
+                ),
+                _digest(intent, block.chainid, address(router)),
+                feeToken,
+                charge
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domain, body));
     }
 
     function _assertRollback(uint256 availableBefore) private view {

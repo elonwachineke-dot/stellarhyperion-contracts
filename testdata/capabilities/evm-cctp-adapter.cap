@@ -22,6 +22,7 @@ method cancelPeerRotation
 method checkDispatch
 method dispatch
 method historicalPeerOf
+method inboundLaneOf
 method laneOf
 method laneReadiness
 method messageTransmitter
@@ -32,8 +33,11 @@ method prepareRenewal
 method proposePeerRotation
 method quoteFee
 method quoteFinalityPolicy
+method receiveMessage
 method renounceOwnership
 method route
+method setInboundLane
+method setInboundLaneEnabled
 method setLane
 method setLaneEnabled
 method setMessageTransmitter

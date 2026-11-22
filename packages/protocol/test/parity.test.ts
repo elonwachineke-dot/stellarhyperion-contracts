@@ -225,6 +225,28 @@ describe("the error vocabularies", () => {
     }
   });
 
+  it("decodes compiled immutable helper errors that bubble through router calls", () => {
+    const artifact = JSON.parse(
+      read(join(evmRoot, "out", "OutboundProvenance.sol", "OutboundProvenance.json")),
+    ) as { abi: { type: string; name?: string; inputs?: { type: string }[] }[] };
+    const declared = new Set<string>(EVM_ERROR_NAMES);
+    const errors = artifact.abi.filter(
+      (entry) => entry.type === "error" && declared.has(entry.name ?? ""),
+    );
+    expect(errors.map((entry) => entry.name)).toEqual(
+      expect.arrayContaining([
+        "FeeTokenNotSupported",
+        "IntentNonceMismatch",
+        "IntentDomainMismatch",
+      ]),
+    );
+    for (const error of errors) {
+      const name = error.name ?? "";
+      const signature = `${name}(${(error.inputs ?? []).map((input) => input.type).join(",")})`;
+      expect(errorNameFromRevert(toFunctionSelector(signature)), signature).toBe(name);
+    }
+  });
+
   it("names an error from revert data the way a wallet hands it over", () => {
     const paused = toFunctionSelector("AdapterNotSet()");
     expect(errorNameFromRevert(paused)).toBe("AdapterNotSet");

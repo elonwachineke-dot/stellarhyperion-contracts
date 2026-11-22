@@ -253,6 +253,18 @@ pub struct HyperionHook {
     pub destination: StellarDestination,
 }
 
+/// Verify the separately commissioned Hyperion burn sender after header messenger authentication.
+/// The header sender is Circle's TokenMessenger and is authenticated by its current/overlap policy.
+pub fn verify_remote_sender(
+    expected_burn_sender: &BytesN<32>,
+    burn_sender: &BytesN<32>,
+) -> Result<(), HyperionError> {
+    if burn_sender != expected_burn_sender {
+        return Err(HyperionError::UnexpectedRailContract);
+    }
+    Ok(())
+}
+
 impl HyperionHook {
     pub fn new(destination: StellarDestination) -> Self {
         Self { destination }

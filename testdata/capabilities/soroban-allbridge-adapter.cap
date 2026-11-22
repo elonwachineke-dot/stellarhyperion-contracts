@@ -9,7 +9,9 @@ surface soroban/allbridge-adapter
 contract AllbridgeAdapter
 status gated
 # Public callable methods, sorted.
+method activate_validator_rotation
 method bridge_in
+method cancel_validator_rotation
 method chain_for
 method dispatch
 method fund_gas
@@ -26,15 +28,19 @@ method link_asset
 method link_chain
 method maintain_storage
 method pool_for
+method queue_validator_rotation
 method quote_gas
 method rail_open
 method receive
+method reconcile_outbound
 method revalidate_asset
 method route
 method set_admin
+method set_emergency_disabled
 method set_validator
 method sweep
 method upgrade
+method validator_epoch
 method withdraw_gas
 
 # Routes this surface can carry, as protocol slugs.

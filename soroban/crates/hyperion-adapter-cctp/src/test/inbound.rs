@@ -87,8 +87,11 @@ fn what_gets_delivered_is_what_arrived_not_what_was_sent() {
     // money that never got minted.
     w.transmitter().set_fee(&250_000);
 
+    let mut spec = w.spec(ARRIVING, 3, w.hook_to_recipient());
+    spec.max_fee = 250_000;
+    spec.fee_executed = 250_000;
     w.adapter()
-        .receive(&w.relayer, &w.inbound(ARRIVING, 3), &w.attestation());
+        .receive(&w.relayer, &spec.encode(&w.env), &w.attestation());
     assert_eq!(w.token().balance(&w.recipient), ARRIVING - 250_000);
     assert_eq!(w.token().balance(&w.adapter_id), 0);
 }
@@ -241,6 +244,27 @@ fn a_source_domain_the_admin_never_linked_is_refused() {
         w.adapter()
             .try_receive(&w.relayer, &spec.encode(&w.env), &w.attestation()),
         Err(Ok(HyperionError::UnknownChain))
+    );
+}
+
+#[test]
+fn forged_header_or_burn_sender_is_refused() {
+    let w = World::new();
+
+    let mut header = w.spec(ARRIVING, 34, w.hook_to_recipient());
+    header.sender = [0xDEu8; 32];
+    assert_eq!(
+        w.adapter()
+            .try_receive(&w.relayer, &header.encode(&w.env), &w.attestation()),
+        Err(Ok(HyperionError::UnexpectedRailContract))
+    );
+
+    let mut body = w.spec(ARRIVING, 35, w.hook_to_recipient());
+    body.message_sender = [0xDEu8; 32];
+    assert_eq!(
+        w.adapter()
+            .try_receive(&w.relayer, &body.encode(&w.env), &w.attestation()),
+        Err(Ok(HyperionError::UnexpectedRailContract))
     );
 }
 
@@ -570,4 +594,128 @@ fn a_claim_nobody_ever_made_cannot_be_settled() {
         w.router().try_settle_claim(&w.relayer, &99),
         Err(Ok(HyperionError::ClaimNotFound))
     );
+}
+
+#[test]
+fn burn_sender_and_header_messenger_are_independent_and_swapping_them_never_mints() {
+    let w = World::new();
+    let correct = w.spec(ARRIVING, 920, w.hook_to_recipient());
+    assert_ne!(correct.sender, correct.message_sender);
+    let mut forged = correct.clone();
+    forged.sender = correct.message_sender;
+    forged.message_sender = correct.sender;
+    assert_eq!(
+        w.adapter()
+            .try_receive(&w.relayer, &forged.encode(&w.env), &w.attestation()),
+        Err(Ok(HyperionError::UnexpectedRailContract))
+    );
+    assert_eq!(w.token().balance(&w.adapter_id), 0);
+    assert_eq!(w.token().balance(&w.recipient), 0);
+    assert!(!w
+        .router()
+        .was_processed(&RouteKind::Cctp, &nonce_word(&w, 920)));
+    w.adapter()
+        .receive(&w.relayer, &correct.encode(&w.env), &w.attestation());
+    assert_eq!(w.token().balance(&w.recipient), ARRIVING);
+}
+
+#[test]
+fn outbound_lane_does_not_commission_either_inbound_sender_boundary() {
+    let w = World::new();
+    let spec = w.spec(ARRIVING, 921, w.hook_to_recipient());
+    w.env.as_contract(&w.adapter_id, || {
+        w.env
+            .storage()
+            .persistent()
+            .remove(&crate::storage::DataKey::RemoteSender(ETHEREUM_DOMAIN))
+    });
+    assert_eq!(
+        w.adapter()
+            .try_receive(&w.relayer, &spec.encode(&w.env), &w.attestation()),
+        Err(Ok(HyperionError::RailNotConfigured))
+    );
+    w.adapter().set_remote_sender(
+        &ETHEREUM_DOMAIN,
+        &BytesN::from_array(&w.env, &spec.message_sender),
+    );
+    w.env.as_contract(&w.adapter_id, || {
+        w.env
+            .storage()
+            .instance()
+            .remove(&crate::storage::DataKey::PeerMessenger(ETHEREUM_DOMAIN))
+    });
+    assert_eq!(
+        w.adapter()
+            .try_receive(&w.relayer, &spec.encode(&w.env), &w.attestation()),
+        Err(Ok(HyperionError::RailNotConfigured))
+    );
+    assert_eq!(w.token().balance(&w.recipient), 0);
+    assert_eq!(w.token().balance(&w.adapter_id), 0);
+}
+
+#[test]
+fn fee_fields_and_exact_mint_delta_reject_provider_under_or_over_mint_without_consuming_nonce() {
+    let w = World::new();
+    let spec = w.spec(ARRIVING, 922, w.hook_to_recipient());
+    for fee in [-1, 1] {
+        w.transmitter().set_fee(&fee);
+        assert_eq!(
+            w.adapter()
+                .try_receive(&w.relayer, &spec.encode(&w.env), &w.attestation()),
+            Err(Ok(HyperionError::InvalidAmount))
+        );
+        assert_eq!(w.token().balance(&w.recipient), 0);
+        assert_eq!(w.token().balance(&w.adapter_id), 0);
+        assert!(!w
+            .router()
+            .was_processed(&RouteKind::Cctp, &nonce_word(&w, 922)));
+    }
+    w.transmitter().set_fee(&0);
+    w.adapter()
+        .receive(&w.relayer, &spec.encode(&w.env), &w.attestation());
+    assert_eq!(w.token().balance(&w.recipient), ARRIVING);
+}
+
+#[test]
+fn invalid_fee_finality_expiration_and_wide_amount_are_refused_before_custody() {
+    let w = World::new();
+    for mode in 0..6 {
+        let mut spec = w.spec(ARRIVING, 930 + mode, w.hook_to_recipient());
+        match mode {
+            0 => {
+                spec.fee_executed = 1;
+            }
+            1 => {
+                spec.max_fee = ARRIVING + 1;
+            }
+            2 => {
+                spec.max_fee = ARRIVING;
+                spec.fee_executed = ARRIVING;
+            }
+            3 => {
+                spec.min_finality_threshold = 2000;
+                spec.finality_threshold_executed = 1000;
+            }
+            4 => {
+                spec.expiration_block = 1;
+            }
+            _ => {
+                spec.amount = 0;
+            }
+        }
+        assert!(w
+            .adapter()
+            .try_receive(&w.relayer, &spec.encode(&w.env), &w.attestation())
+            .is_err());
+        assert_eq!(w.token().balance(&w.recipient), 0);
+        assert_eq!(w.token().balance(&w.adapter_id), 0);
+    }
+    let mut message = w.inbound(ARRIVING, 936);
+    message.set(hyperion_core::cctp::MSG_BODY + 68, 1);
+    assert_eq!(
+        w.adapter()
+            .try_receive(&w.relayer, &message, &w.attestation()),
+        Err(Ok(HyperionError::DecimalOverflow))
+    );
+    assert_eq!(w.token().balance(&w.recipient), 0);
 }

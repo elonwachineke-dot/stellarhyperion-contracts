@@ -7,6 +7,7 @@ import {console} from "forge-std/console.sol";
 import {HyperionRouter} from "../src/HyperionRouter.sol";
 import {RouteKind} from "../src/HyperionTypes.sol";
 import {OutboundProvenance} from "../src/OutboundProvenance.sol";
+import {TokenRecoveryManager} from "../src/TokenRecoveryManager.sol";
 import {AxelarItsAdapter} from "../src/adapters/AxelarItsAdapter.sol";
 import {CctpAdapter} from "../src/adapters/CctpAdapter.sol";
 
@@ -45,6 +46,7 @@ contract Verify is DeployConfig {
 
         _expectUint("chain id", block.chainid, record.readUint(".chainId"));
         _verifyProvenance(record, router);
+        _verifyRecoveryManager(record, router);
         CompatibilityProfile memory profile =
             _verifiedArtifactProfile(vm.getArtifactPathByCode(type(HyperionRouter).creationCode));
         _verifiedArtifactProfile(vm.getArtifactPathByCode(type(CctpAdapter).creationCode));
@@ -98,7 +100,7 @@ contract Verify is DeployConfig {
         }
     }
 
-    function _verifyProvenance(string memory record, HyperionRouter router) private {
+    function _verifyProvenance(string memory record, HyperionRouter router) internal {
         address expected =
             address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"01")))));
         address recorded = record.readAddress(".provenanceStore");
@@ -112,6 +114,34 @@ contract Verify is DeployConfig {
         if (expected.code.length != 0) {
             _expectAddress(
                 "immutable provenance router", OutboundProvenance(expected).ROUTER(), address(router)
+            );
+        }
+    }
+
+    function _verifyRecoveryManager(string memory record, HyperionRouter router) internal {
+        address expected =
+            address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"02")))));
+        bool hasAddress = vm.keyExistsJson(record, ".recoveryManager");
+        bool hasCodeHash = vm.keyExistsJson(record, ".recoveryManagerCodeHash");
+        require(hasAddress == hasCodeHash, "record has incomplete token recovery manager fields");
+        if (!hasAddress) {
+            require(expected.code.length == 0, "record lacks required token recovery manager");
+            console.log("WARN legacy router record has no token recovery manager");
+            return;
+        }
+        address recorded = record.readAddress(".recoveryManager");
+        _expectAddress("immutable token recovery manager address", recorded, expected);
+        _expectTrue("immutable token recovery manager code exists", expected.code.length != 0);
+        _expectBytes32(
+            "immutable token recovery manager code hash",
+            expected.codehash,
+            record.readBytes32(".recoveryManagerCodeHash")
+        );
+        if (expected.code.length != 0) {
+            _expectAddress(
+                "immutable token recovery manager router",
+                TokenRecoveryManager(expected).ROUTER(),
+                address(router)
             );
         }
     }

@@ -1,0 +1,16 @@
+# Hyperion contract interface capability snapshot.
+#
+# This file is the reviewed record of the EVM development-only token recovery manager.
+# Recovery stays gated until the EVM lane is independently validated.
+surface evm/token-recovery-manager
+contract TokenRecoveryManager
+status gated
+method ROUTER
+method cancelTokenRecovery
+method claimLiability
+method executeTokenRecovery
+method queueTokenRecovery
+method queuedTokenRecovery
+method recordClaim
+method releaseClaim
+method tokenRecoveryCount

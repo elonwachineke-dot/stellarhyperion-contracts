@@ -70,7 +70,10 @@ interface IMessageTransmitterV2 {
     /// does. Anybody can push somebody else's transfer through, including the recipient.
     /// @param message The message Circle emitted on the source chain, byte for byte.
     /// @param attestation Circle's signature over that message.
-    function receiveMessage(bytes calldata message, bytes calldata attestation) external;
+    /// @return success True when Circle accepts and executes the message.
+    function receiveMessage(bytes calldata message, bytes calldata attestation)
+        external
+        returns (bool success);
 
     /// @notice This chain's Circle domain number.
     function localDomain() external view returns (uint32);

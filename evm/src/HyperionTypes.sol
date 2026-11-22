@@ -198,6 +198,19 @@ struct QueuedAction {
     bool executed;
 }
 
+/// @dev A timelocked proposal to return only accidental, unencumbered ERC20 custody.
+struct QueuedTokenRecovery {
+    uint64 id;
+    address token;
+    address recipient;
+    uint256 amount;
+    uint64 queuedAt;
+    uint64 eta;
+    uint64 expiresAt;
+    bool executed;
+    bool cancelled;
+}
+
 /// @dev What a route would do with a given amount right now, without doing it.
 struct RouteQuote {
     RouteKind route;

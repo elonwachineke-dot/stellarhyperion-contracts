@@ -1,7 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {InvalidAmount, InvalidSignature, Unauthorized} from "./HyperionErrors.sol";
+import {
+    AdapterMethodUnavailable,
+    AmountNotRepresentable,
+    FeeTokenNotSupported,
+    IntentDomainMismatch,
+    IntentExpired,
+    IntentNonceMismatch,
+    InvalidAmount,
+    InvalidDestination,
+    InvalidRelayerFee,
+    InvalidSignature,
+    MuxedNotSupported,
+    ProviderBudgetExceeded,
+    RailNotConfigured,
+    SlippageExceeded,
+    TokenNotMapped,
+    Unauthorized,
+    UnknownChain,
+    ZeroAddressKey
+} from "./HyperionErrors.sol";
 import {
     AddressKind,
     Destination,
@@ -17,6 +36,7 @@ import {IRouterActionState, RouterActionValidator} from "./RouterActionValidator
 import {IRailAdapter} from "./interfaces/IRailAdapter.sol";
 import {AmountMath} from "./libraries/AmountMath.sol";
 import {RouteMeta} from "./libraries/RouteMeta.sol";
+import {StellarAddress} from "./libraries/StellarAddress.sol";
 
 /// @title Read-only router quote inputs
 /// @notice State and pure address validation queried by the immutable router support module.
@@ -33,8 +53,10 @@ interface IRouterQuoteState is IRouterActionState {
     function feeBps() external view returns (uint16);
     /// @notice Unconsumed cross-chain flow allowance.
     function flowAvailable(address token, RouteKind route) external view returns (uint256);
+    /// @notice Current shared signed execution nonce.
+    function intentNonce(address sender) external view returns (uint256);
     /// @notice Decode and validate the destination using the router's unchanged pure ABI.
-    function checkDestination(string calldata strkey) external pure returns (AddressKind, bytes32, uint64);
+    function checkDestination(string calldata strkey) external view returns (AddressKind, bytes32, uint64);
 }
 
 /// @title Append-only provenance owned by the router that deploys it
@@ -54,6 +76,55 @@ contract OutboundProvenance is RouterActionValidator {
     );
     bytes32 private constant _EIP712_NAME_HASH = keccak256("HyperionRouter");
     bytes32 private constant _EIP712_VERSION_HASH = keccak256("1");
+
+    /// @notice Parse the unchanged Stellar address format without accessing router state.
+    function checkDestination(string calldata strkey) external pure returns (AddressKind, bytes32, uint64) {
+        return StellarAddress.parse(strkey);
+    }
+
+    /// @notice Preserve router dispatch refusal selectors and reject unknown provider failures.
+    function rethrowAdapterFailure(bytes calldata failure) external pure {
+        if (failure.length < 4) revert AdapterMethodUnavailable();
+        bytes4 code = bytes4(failure[:4]);
+        if (code == Unauthorized.selector) revert Unauthorized();
+        if (code == InvalidAmount.selector) revert InvalidAmount();
+        if (code == TokenNotMapped.selector) revert TokenNotMapped();
+        if (code == UnknownChain.selector) revert UnknownChain();
+        if (code == RailNotConfigured.selector) revert RailNotConfigured();
+        if (code == InvalidDestination.selector) revert InvalidDestination();
+        if (code == ZeroAddressKey.selector) revert ZeroAddressKey();
+        if (code == MuxedNotSupported.selector) revert MuxedNotSupported();
+        revert AdapterMethodUnavailable();
+    }
+
+    /// @notice Compute exact outbound amounts using the router's unchanged fee and rounding rules.
+    function outboundAmounts(
+        uint256 amount,
+        uint16 feeBps,
+        uint8 sourceDecimals,
+        uint8 destinationDecimals,
+        uint256 minimum
+    ) external pure returns (uint256 fee, uint256 net) {
+        uint256 netRaw;
+        (netRaw, fee) = AmountMath.applyFee(amount, feeBps);
+        net = AmountMath.floorToRepresentable(netRaw, sourceDecimals, destinationDecimals);
+        if (net == 0) revert AmountNotRepresentable();
+        uint256 landing = AmountMath.convertDecimalsExact(net, sourceDecimals, destinationDecimals);
+        if (landing < minimum) revert SlippageExceeded(minimum, landing);
+    }
+
+    /// @notice Quote all four rails in their unchanged enum order.
+    function quoteAll(
+        address token,
+        uint256 amount,
+        Destination calldata destination,
+        uint8 destinationDecimals
+    ) external view returns (RouteQuote[] memory quotes) {
+        quotes = new RouteQuote[](4);
+        for (uint256 i = 0; i < 4; ++i) {
+            quotes[i] = quote(RouteKind(i), token, amount, destination, destinationDecimals);
+        }
+    }
 
     /// @notice Commit exactly one successful source dispatch; records cannot be replaced.
     function commit(OutboundRecord calldata record) external {
@@ -97,6 +168,57 @@ contract OutboundProvenance is RouterActionValidator {
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    /// @notice Hash an additive fee authorization without changing legacy typed intent identities.
+    function hashTransferIntentWithRelayerFee(
+        TransferIntent calldata intent,
+        address feeToken,
+        uint256 charge
+    ) public view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256(
+                    "RelayerFeeIntent(bytes32 transferIntentHash,address feeToken,uint256 maxRelayerCharge)"
+                ),
+                hashTransferIntent(intent),
+                feeToken,
+                charge
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    /// @notice Read-only admission for both signed entrypoints; the router consumes the shared nonce.
+    function validateTransferIntent(
+        TransferIntent calldata intent,
+        bytes calldata signature,
+        uint256 providerPayment,
+        address feeToken,
+        uint256 charge,
+        bool feeSigned,
+        address relayer
+    ) external view {
+        if (intent.router != ROUTER || intent.chainId != block.chainid) {
+            revert IntentDomainMismatch();
+        }
+        if (intent.deadline < block.timestamp) revert IntentExpired(intent.deadline);
+        uint256 expectedNonce = IRouterQuoteState(ROUTER).intentNonce(intent.sender);
+        if (intent.nonce != expectedNonce) revert IntentNonceMismatch(expectedNonce, intent.nonce);
+        if (providerPayment > intent.maxProviderBudget) revert ProviderBudgetExceeded();
+        bytes32 digest = feeSigned
+            ? hashTransferIntentWithRelayerFee(intent, feeToken, charge)
+            : hashTransferIntent(intent);
+        if (_recover(digest, signature) != intent.sender) revert InvalidSignature();
+        if (charge == 0) {
+            if (feeToken != address(0)) revert InvalidRelayerFee();
+        } else {
+            if (!feeSigned || relayer == intent.sender) revert InvalidRelayerFee();
+            TokenConfig memory config = IRouterQuoteState(ROUTER).tokenConfig(feeToken);
+            if (feeToken == address(0) || !config.registered || !config.enabled) {
+                revert FeeTokenNotSupported();
+            }
+        }
     }
 
     function _domainSeparator() private view returns (bytes32) {

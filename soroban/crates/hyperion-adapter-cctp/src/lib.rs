@@ -367,11 +367,16 @@ impl CctpAdapter {
 
         let source_chain =
             storage::chain_of(&env, msg.source_domain).ok_or(HyperionError::UnknownChain)?;
+        let remote_sender = storage::remote_sender(&env, msg.source_domain)
+            .ok_or(HyperionError::RailNotConfigured)?;
+        cctp::verify_remote_sender(&remote_sender, &burn.message_sender)?;
         let token = storage::asset(&env, msg.source_domain, &burn.burn_token)
             .ok_or(HyperionError::TokenNotMapped)?;
 
         // Peer messenger validation on the source domain
-        if let Some(active_peer) = storage::peer_messenger(&env, msg.source_domain) {
+        let active_peer = storage::peer_messenger(&env, msg.source_domain)
+            .ok_or(HyperionError::RailNotConfigured)?;
+        {
             let is_current = msg.sender == active_peer;
             if !is_current {
                 let accepted_as_old = storage::old_peer_messenger(&env, msg.source_domain)
@@ -394,6 +399,24 @@ impl CctpAdapter {
                 }
             }
         }
+
+        if !cctp::is_supported_finality_threshold(msg.min_finality_threshold)
+            || msg.finality_threshold_executed < msg.min_finality_threshold
+        {
+            return Err(HyperionError::UnsupportedMessageVersion);
+        }
+        if burn.amount <= 0
+            || burn.max_fee > burn.amount
+            || burn.fee_executed > burn.max_fee
+            || burn.fee_executed >= burn.amount
+        {
+            return Err(HyperionError::InvalidAmount);
+        }
+        if burn.expiration_block != 0 && burn.expiration_block < i128::from(env.ledger().sequence())
+        {
+            return Err(HyperionError::TimelockExpired);
+        }
+        let expected_minted = burn.amount - burn.fee_executed;
 
         // Resolve the destination before anything is minted. A muxed account cannot be delivered
         // to over this route, and finding that out after the mint would mean funds sitting in an
@@ -419,6 +442,9 @@ impl CctpAdapter {
             .ok_or(HyperionError::DecimalOverflow)?;
         if minted <= 0 {
             return Err(HyperionError::NothingMinted);
+        }
+        if minted != expected_minted {
+            return Err(HyperionError::InvalidAmount);
         }
 
         // The router pulls rather than trusts an adapter's word, so say in advance that this one
@@ -609,7 +635,26 @@ impl CctpAdapter {
         Ok(())
     }
 
-    /// Record which local asset Circle mints for a given remote token.
+    /// Configure the remote Hyperion adapter carried in burn.messageSender for a linked domain.
+    /// This is independent from destination-caller configuration and must be commissioned
+    /// explicitly before inbound receive is enabled.
+    pub fn set_remote_sender(
+        env: Env,
+        domain: u32,
+        remote_sender: BytesN<32>,
+    ) -> Result<(), HyperionError> {
+        require_admin(&env)?;
+        if storage::chain_of(&env, domain).is_none() {
+            return Err(HyperionError::UnknownChain);
+        }
+        if remote_sender == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(HyperionError::ZeroAddressKey);
+        }
+        storage::set_remote_sender(&env, domain, &remote_sender);
+        Ok(())
+    }
+
+    /// Record which local asset Circle mints for a given remote burn token.
     pub fn map_asset(
         env: Env,
         domain: u32,

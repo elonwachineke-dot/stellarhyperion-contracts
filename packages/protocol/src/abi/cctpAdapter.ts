@@ -337,6 +337,57 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "inboundLaneOf",
+    "inputs": [
+      {
+        "name": "domain",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct CctpAdapter.InboundLane",
+        "components": [
+          {
+            "name": "chain",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "tokenMessenger",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "peer",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "burnToken",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "configured",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "laneOf",
     "inputs": [
       {
@@ -653,6 +704,30 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "receiveMessage",
+    "inputs": [
+      {
+        "name": "message",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "attestation",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "claimId",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "renounceOwnership",
     "inputs": [],
     "outputs": [],
@@ -683,6 +758,57 @@ export const cctpAdapterAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "setInboundLane",
+    "inputs": [
+      {
+        "name": "domain",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "tokenMessenger",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "peer",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "burnToken",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setInboundLaneEnabled",
+    "inputs": [
+      {
+        "name": "domain",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "enabled",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -903,6 +1029,62 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "event",
+    "name": "InboundLaneConfigured",
+    "inputs": [
+      {
+        "name": "domain",
+        "type": "uint32",
+        "indexed": true,
+        "internalType": "uint32"
+      },
+      {
+        "name": "chain",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      },
+      {
+        "name": "tokenMessenger",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "peer",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "burnToken",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "InboundLaneEnabled",
+    "inputs": [
+      {
+        "name": "domain",
+        "type": "uint32",
+        "indexed": true,
+        "internalType": "uint32"
+      },
+      {
+        "name": "enabled",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "LaneConfigured",
     "inputs": [
       {
@@ -1099,6 +1281,21 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "MalformedMessage",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NothingMinted",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotMintRecipient",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "OwnableInvalidOwner",
     "inputs": [
       {
@@ -1126,7 +1323,17 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "RefundFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReplayedMessage",
     "inputs": []
   },
   {
@@ -1173,7 +1380,27 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "UnexpectedRailContract",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "UnknownChain",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnsupportedHookVersion",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnsupportedMessageVersion",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WrongDomain",
     "inputs": []
   },
   {

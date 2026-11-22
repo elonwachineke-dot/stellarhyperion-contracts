@@ -6,6 +6,7 @@ import {console} from "forge-std/console.sol";
 import {HyperionRouter} from "../src/HyperionRouter.sol";
 import {ActionKind, AdminAction, RouteKind} from "../src/HyperionTypes.sol";
 import {OutboundProvenance} from "../src/OutboundProvenance.sol";
+import {TokenRecoveryManager} from "../src/TokenRecoveryManager.sol";
 import {AxelarItsAdapter} from "../src/adapters/AxelarItsAdapter.sol";
 import {CctpAdapter} from "../src/adapters/CctpAdapter.sol";
 
@@ -81,6 +82,7 @@ contract Deploy is DeployConfig {
         console.log("router              ", address(router));
 
         cctp = new CctpAdapter(address(router), rails.cctpTokenMessenger, token.token, deployer);
+        cctp.setMessageTransmitter(rails.cctpMessageTransmitter);
         console.log("cctp adapter        ", address(cctp));
 
         // Once only, and the one that matters most. The mint recipient is who Circle credits on
@@ -196,7 +198,7 @@ contract Deploy is DeployConfig {
         vm.serializeUint(key, "optimizerRuns", profile.optimizerRuns);
         vm.serializeBool(key, "viaIR", profile.viaIR);
         vm.serializeAddress(key, "router", address(router));
-        // The router constructor creates exactly one support child at its first CREATE nonce.
+        // The router constructor creates provenance at nonce one and recovery at nonce two.
         address provenanceStore =
             address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"01")))));
         require(
@@ -206,6 +208,15 @@ contract Deploy is DeployConfig {
         );
         vm.serializeAddress(key, "provenanceStore", provenanceStore);
         vm.serializeBytes32(key, "provenanceStoreCodeHash", provenanceStore.codehash);
+        address recoveryManager =
+            address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"02")))));
+        require(
+            recoveryManager.code.length != 0
+                && TokenRecoveryManager(recoveryManager).ROUTER() == address(router),
+            "router recovery manager identity differs"
+        );
+        vm.serializeAddress(key, "recoveryManager", recoveryManager);
+        vm.serializeBytes32(key, "recoveryManagerCodeHash", recoveryManager.codehash);
         vm.serializeAddress(key, "deployer", deployer);
         vm.serializeAddress(key, "admin", params.admin);
         vm.serializeAddress(key, "guardian", params.guardian);

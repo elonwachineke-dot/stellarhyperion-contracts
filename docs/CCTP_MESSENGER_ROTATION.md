@@ -1,10 +1,10 @@
 # CCTP remote-messenger rotation with overlap controls
 
-CCTP remote-messenger and peer messenger replacement uses `propose_peer_rotation` / `apply_peer_rotation` / `cancel_peer_rotation` (or `propose_messenger_rotation` / `apply_messenger_rotation` / `cancel_messenger_rotation` for local TokenMessenger) on Soroban, and `proposePeerRotation` / `applyPeerRotation` / `cancelPeerRotation` on EVM. The minimum timelock delay is 3,600 seconds (1 hour). Proposals do not alter active routing trust until applied at or after the recorded eta. A proposal must be cancelled before a replacement proposal can be submitted.
+Soroban Circle header TokenMessenger replacement uses `propose_peer_rotation` / `apply_peer_rotation` / `cancel_peer_rotation` (or `propose_messenger_rotation` / `apply_messenger_rotation` / `cancel_messenger_rotation` for the local TokenMessenger). EVM `proposePeerRotation` / `applyPeerRotation` / `cancelPeerRotation` rotates only the outbound destination mint recipient; it does not rotate inbound trust. The minimum timelock delay is 3,600 seconds (1 hour). Proposals do not alter active routing trust until applied at or after the recorded eta. A proposal must be cancelled before a replacement proposal can be submitted.
 
 ## Acceptance windows and historical-message handling
 
-Unlike instantaneous cutover models where old-peer messages in flight are rejected at cutover, CCTP peer messenger replacement introduces an explicit historical-message acceptance window (overlap window, default 86,400 seconds / 24 hours).
+Soroban Circle header TokenMessenger replacement introduces a historical-message acceptance window (default 86,400 seconds / 24 hours). The following table describes Soroban inbound header trust. The independently commissioned remote Hyperion burn sender must still match; overlap does not authorize arbitrary burn senders.
 
 | Messenger / Lane state     | Inbound: active peer         | Inbound: retired peer (old)  | Inbound: unauthorized peer | Outbound dispatch  |
 | -------------------------- | ---------------------------- | ---------------------------- | -------------------------- | ------------------ |
@@ -18,7 +18,15 @@ Unlike instantaneous cutover models where old-peer messages in flight are reject
 Messages from unauthorized peers never acquire inbound custody. During normal operation, only the active peer messenger is trusted. During the acceptance window following an applied rotation, in-flight messages signed against the retired peer messenger are accepted so that transfers crossing the network before cutover settle cleanly into their recipient accounts or claims without stranding funds. Once the acceptance window elapses, old messages are rejected with `OldMessengerExpired`.
 
 ### Emergency-disable controls
-Administrative disable controls (`set_domain_disabled` on Soroban, `setLaneEnabled` on EVM) halt both outbound burns and inbound custody immediately. Applying or cancelling a rotation never re-enables a disabled domain or lane. Emergency disable preserves funds in place while an upstream fault or provider upgrade anomaly is investigated.
+Soroban `set_domain_disabled` halts both outbound burns and inbound custody immediately. EVM `setLaneEnabled` controls outbound only; `setInboundLaneEnabled(sourceDomain, enabled)` independently controls inbound receipt. Applying or cancelling a rotation never re-enables a disabled domain or lane. Emergency disable preserves funds in place while an upstream fault or provider upgrade anomaly is investigated.
+
+## EVM inbound identity replacement
+
+EVM `setInboundLane` independently commissions a source domain's Circle TokenMessenger header sender,
+remote Hyperion burn sender and remote burn token once. Outbound rotation and its historical peer
+record do not change these checks. There is no EVM inbound overlap or in-place identity replacement;
+a replacement requires a separately reviewed fresh adapter deployment and router receiver migration.
+Accepted fixed-recipient claims remain in the router and can settle after inbound disable or replacement.
 
 ## Provider upgrade compatibility & message boundaries
 Provider upgrades must adhere to explicit message-boundary guarantees:

@@ -17,3 +17,29 @@ For `Unavailable`, allowance zero is a placeholder and `is_clean` / `isClean` is
 Existing dispatch signatures, burn parameters, storage keys, and error numbers remain unchanged. Finality is lane-specific on Soroban: missing policy entries default to finalized threshold 2000, and fast threshold 1000 requires explicit lane configuration and a nonzero fee budget. The legacy global fee setter rejects weaker thresholds. The EVM development adapter remains finalized-only and reports its policy through `quoteFinalityPolicy` and `FinalityPolicyUsed`. See [CCTP finality policy](./CCTP_FINALITY_POLICY.md) for compatibility and migration details.
 
 These checks do not authorize deployment or replace Circle's attestation verification. Activation and upgrade rehearsal remain subject to the existing testnet gates. The hostile fixtures test messenger failure after token movement and record mutation, inconsistent approvals, failed/nonzero cleanup, unchanged source balances and router fees/flow/nonce, and retry after the fault is removed. They do not claim production Circle integration.
+
+## Inbound compatibility and migration
+
+Inbound CCTP is a separately commissioned boundary, not activation of the active Stellar Testnet outbound route. A receiving adapter must verify CCTP wire version, destination domain, source-domain lane, remote peer sender, TokenMessenger recipient, burn version, burn token, mint recipient, exact minted amount and hook shape before router delivery. The full 32-byte CCTP nonce remains the replay identity; a u64 display nonce is informational only.
+
+The EVM receiver keeps the four-argument constructor. The owner explicitly sets the mutable `messageTransmitter` and commissions `setInboundLane(sourceDomain, chain, tokenMessenger, peer, burnToken)`. The header sender must match Circle's remote TokenMessenger; `burn.messageSender` must independently match the remote Hyperion adapter, and the remote burn-token word may differ from local USDC. Inbound identities are fixed once per source domain. Replacing them requires a separately reviewed fresh adapter deployment; outbound peer rotation neither replaces inbound identities nor grants inbound overlap. `setInboundLaneEnabled` controls inbound independently of `setLaneEnabled`.
+
+The EVM finalized-only receiver accepts minimum finality 2000, executed finality at least 2000, zero max/executed provider fees, a positive amount within uint128, and an unexpired destination block when expiration is present. The header destination caller must be zero or the receiving adapter. Before routing it requires Circle's `receiveMessage` to return true and mint exactly the attested amount. The router receives only an exact temporary allowance; successful delivery clears it and preserves preexisting adapter custody. Provider failure, false or malformed return, inconsistent mint, reentry, or router failure rolls back minting and replay state. Failed recipient payouts instead park a fixed-recipient claim, preserving the accepted message's replay protection.
+
+This adds inbound storage and a reentrancy guard to a nonupgradeable EVM adapter. Existing deployments do not acquire this layout or inbound behavior automatically. Changing the mutable transmitter also changes the attestation trust boundary: review its code, local domain, interface and provider configuration before commissioning or replacing it. The deployment script commissions only outbound routing. Existing outbound lane storage and dispatch signatures do not establish valid inbound trust.
+
+Provider upgrades must preserve the CCTP v2 offsets and exact uint256/i128 amount conversion documented in `hyperion-core::cctp`. Any provider change that alters those offsets, recipient semantics, replay nonce identity or transmitter interface requires a wire-format fixture, parity test and deployment migration. It must not silently reuse the active outbound lane as authorization for inbound receipt.
+
+On Soroban, commission two distinct source identities before inbound use: `set_peer_messenger`
+binds the CCTP header sender to Circle's remote TokenMessenger; `set_remote_sender` binds
+`burn.messageSender` to the remote Hyperion adapter. The existing delayed TokenMessenger rotation
+and historical overlap window continue to apply to the header. Neither source identity is
+inferred from `link_domain` or outbound destination-caller configuration. Existing receiving
+installations must explicitly commission the burn sender; outgoing-only lanes remain usable.
+
+Before router delivery, the receiving adapter validates the mapped burn token, supported minimum
+finality and actual finality, non-expired destination ledger, positive amount, fee bounds and an
+exact mint delta of `burn.amount - burn.feeExecuted`. A provider under-mint or over-mint rolls back
+custody and replay state. Fees are read from the attested wire fields, not independently asserted
+provider output. Circle still verifies attestations; local native provider fixtures establish the
+adapter's boundaries and rollback behavior rather than production Circle cryptography.

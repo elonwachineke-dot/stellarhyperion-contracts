@@ -31,7 +31,7 @@ optimizer_runs = 200
 # branch, and a warning nobody has to clear is a warning everybody scrolls past.
 deny = "warnings"
 
-gas_reports = ["HyperionRouter", "CctpAdapter", "AxelarItsAdapter"]
+gas_reports = ["HyperionRouter", "TokenRecoveryManager", "CctpAdapter", "AxelarItsAdapter"]
 
 # Deploy scripts may write only their address book. Tests may read the shared reference corpus.
 fs_permissions = [
